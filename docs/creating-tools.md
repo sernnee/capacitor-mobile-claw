@@ -96,5 +96,5 @@ const clipboardTools: DeviceTool[] = [
 
 ## See Also
 
-- [capacitor-mobile-claw-device-tools](https://github.com/rogelioRuiz/capacitor-mobile-claw-device-tools) — 64+ pre-built device tools (camera, sensors, clipboard, SSH, etc.)
+- [capacitor-mobile-claw-device-tools](https://www.npmjs.com/package/capacitor-mobile-claw-device-tools) — 64+ pre-built device tools (camera, sensors, clipboard, SSH, etc.)
 - [MCP specification](https://modelcontextprotocol.io/) — Full protocol documentation

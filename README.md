@@ -202,7 +202,7 @@ await engine.init({
 
 ## Related Packages
 
-- [capacitor-mobile-claw-device-tools](https://github.com/rogelioRuiz/capacitor-mobile-claw-device-tools) — 64+ pre-built device tools (camera, clipboard, sensors, SSH, etc.)
+- [capacitor-mobile-claw-device-tools](https://www.npmjs.com/package/capacitor-mobile-claw-device-tools) — 64+ pre-built device tools (camera, clipboard, sensors, SSH, etc.)
 
 ## Contributing
 
