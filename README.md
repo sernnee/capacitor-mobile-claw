@@ -10,6 +10,55 @@ Mobile Claw is a [Capacitor](https://capacitorjs.com/) plugin that embeds a full
 
 > Built on [OpenClaw](https://github.com/openclaw/openclaw) and the [Pi framework](https://www.npmjs.com/package/@mariozechner/pi-ai) by [Mario Zechner](https://github.com/badlogic). Pi's philosophy of *"what you leave out matters more than what you put in"* — just 4 core tools and a system prompt under 1,000 tokens — is what makes running a capable AI agent on a phone possible at all.
 
+## Try It — Reference App
+
+The fastest way to see Mobile Claw in action is the included reference app — a complete Vue 3 chat UI with streaming, tool approval, session management, and all features wired up.
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) >= 20
+- [Android Studio](https://developer.android.com/studio) (for Android) or [Xcode](https://developer.apple.com/xcode/) (for iOS)
+- An Anthropic API key or Claude Max subscription
+
+### Run on Android
+
+```bash
+# Clone the repo
+git clone https://github.com/rogelioRuiz/capacitor-mobile-claw.git
+cd capacitor-mobile-claw
+
+# Install plugin dependencies
+npm install
+
+# Set up the reference app
+cd examples/reference-app
+npm install
+
+# Build the web app
+npm run build
+
+# Add the Android platform (first time only)
+npx cap add android
+
+# Sync web assets → native project
+npx cap sync android
+
+# Open in Android Studio — build & run from there
+npx cap open android
+```
+
+### Run on iOS
+
+```bash
+cd examples/reference-app
+npx cap add ios
+npx cap sync ios
+npx cap open ios
+# Build & run from Xcode
+```
+
+Once the app launches, enter your Anthropic API key in settings and start chatting. The agent can read/write files, run code, use git, and call any registered MCP device tools — all on-device.
+
 ## How It Works
 
 ```
@@ -37,9 +86,7 @@ Mobile Claw is a [Capacitor](https://capacitorjs.com/) plugin that embeds a full
 └─────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
-
-### Install
+## Install in Your Own App
 
 ```bash
 npm install capacitor-mobile-claw
@@ -144,7 +191,6 @@ await engine.init({
 - [Architecture](docs/architecture.md) — system design and layer breakdown
 - [Bridge Protocol](docs/bridge-protocol.md) — UI-to-Worker message reference
 - [Creating Device Tools](docs/creating-tools.md) — how to build custom MCP tools
-- [Reference App](examples/reference-app/) — complete Vue 3 demo with chat UI
 
 ## Related Packages
 
