@@ -1,0 +1,18 @@
+{
+  "name": "mobile-claw-worker",
+  "version": "0.1.0",
+  "description": "Embedded Node.js agent worker for mobile-claw",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.54.1",
+    "@mariozechner/pi-ai": "^0.54.1",
+    "@sinclair/typebox": "^0.34.41",
+    "isomorphic-git": "^1.27.1",
+    "pyodide": "^0.27.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

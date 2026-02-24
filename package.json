@@ -1,0 +1,79 @@
+{
+  "name": "capacitor-mobile-claw",
+  "version": "1.0.0",
+  "description": "On-device AI agent engine for Capacitor apps — embedded Node.js worker with LLM, file tools, code execution, git, and extensible MCP server",
+  "main": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "worker:install": "cd nodejs-assets/nodejs-project && npm install --production",
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "prepack": "npm run build",
+    "release": "changeset publish",
+    "changeset": "changeset"
+  },
+  "files": [
+    "dist/esm/",
+    "nodejs-assets/"
+  ],
+  "peerDependencies": {
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/device": "^8.0.0",
+    "@modelcontextprotocol/sdk": ">=1.0.0",
+    "capacitor-nodejs": ">=1.0.0-beta.1"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@capacitor/core": "^8.1.0",
+    "@capacitor/device": "^8.0.1",
+    "@mariozechner/pi-agent-core": "^0.54.1",
+    "@mariozechner/pi-ai": "^0.54.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@sinclair/typebox": "^0.34.41",
+    "@stomp/stompjs": "^7.0.0",
+    "capacitor-nodejs": "https://github.com/hampoelz/Capacitor-NodeJS/releases/download/v1.0.0-beta.9/capacitor-nodejs.tgz",
+    "isomorphic-git": "^1.37.2",
+    "pyodide": "^0.27.5",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0",
+    "@biomejs/biome": "^2.0.0",
+    "@changesets/cli": "^2.27.0",
+    "@changesets/changelog-github": "^0.5.0",
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "lefthook": "^1.6.0"
+  },
+  "keywords": [
+    "capacitor",
+    "capacitor-plugin",
+    "on-device",
+    "ai",
+    "agent",
+    "llm",
+    "anthropic",
+    "claude",
+    "node.js",
+    "file-tools",
+    "mcp",
+    "model-context-protocol",
+    "mobile",
+    "android",
+    "ios"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

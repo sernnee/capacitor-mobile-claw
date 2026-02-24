@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+# Worker node_modules are intentionally committed — they ship to the device.
+# No package manager on Android/iOS, so deps must be in the repo.
+!nodejs-assets/nodejs-project/node_modules/
+
+# Build output
+dist/
+
+# Test workspaces
+.test-openclaw*/
+.test-workspace*/
+
+# Logs
+*.log
+
+# Capacitor native projects (generated)
+android/
+ios/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Demo video (hosted externally)
+demo.mp4
