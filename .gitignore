@@ -4,8 +4,8 @@ node_modules/
 # No package manager on Android/iOS, so deps must be in the repo.
 !nodejs-assets/nodejs-project/node_modules/
 
-# Build output
-dist/
+# Build output (only at repo root — worker node_modules may have dist/ dirs)
+/dist/
 
 # Test workspaces
 .test-openclaw*/

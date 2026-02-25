@@ -58,6 +58,13 @@ export interface FileWriteMessage {
   content: string
 }
 
+export interface SkillStartMessage {
+  type: 'skill.start'
+  skill: string
+  agentId?: string
+  locale?: string // ISO 639-1: 'en', 'es', etc.
+}
+
 export type UIToNodeMessage =
   | AgentStartMessage
   | AgentStopMessage
@@ -69,6 +76,7 @@ export type UIToNodeMessage =
   | SessionClearMessage
   | FileReadMessage
   | FileWriteMessage
+  | SkillStartMessage
 
 // ── Node.js → UI ────────────────────────────────────────────────────────────
 

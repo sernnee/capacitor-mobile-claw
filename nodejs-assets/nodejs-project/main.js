@@ -52,7 +52,17 @@ const _require = createRequire(import.meta.url);
 const { channel } = _require('bridge');
 
 import { resolve, join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, readFileSync, writeFileSync,
+} from 'node:fs';
+
+// ── SQLite persistence layer ──────────────────────────────────────────────
+import {
+  initWorkerDb, isDbReady,
+  run as dbRun, query as dbQuery, queryOne as dbQueryOne,
+  transaction as dbTransaction, flush as dbFlush,
+  migrateFromJsonl, atomicWrite,
+} from './worker-db.js';
 
 // ── MCP bridge (device tools from WebView) ────────────────────────────────
 import { initMcpBridge } from './mcp-bridge-client.js';
@@ -232,9 +242,7 @@ function loadAuthProfiles(agentId = 'main') {
 
 function saveAuthProfiles(agentId, profiles) {
   const filePath = join(OPENCLAW_ROOT, 'agents', agentId, 'agent', 'auth-profiles.json');
-  const tmpPath = filePath + '.tmp';
-  writeFileSync(tmpPath, JSON.stringify(profiles, null, 2));
-  renameSync(tmpPath, filePath);
+  atomicWrite(filePath, JSON.stringify(profiles, null, 2));
 }
 
 function resolveApiKey(authProfiles) {
@@ -330,7 +338,7 @@ function writeFileTool(args) {
   try {
     const dir = filePath.substring(0, filePath.lastIndexOf('/'));
     mkdirSync(dir, { recursive: true });
-    writeFileSync(filePath, args.content);
+    atomicWrite(filePath, args.content);
     return { success: true, path: args.path };
   } catch (err) {
     return { error: `Failed to write file: ${err.message}` };
@@ -492,7 +500,7 @@ function editFileTool(args) {
     }
 
     const newContent = content.substring(0, index) + args.new_text + content.substring(index + args.old_text.length);
-    writeFileSync(filePath, newContent);
+    atomicWrite(filePath, newContent);
 
     return { success: true, path: args.path, replacements: 1 };
   } catch (err) {
@@ -1080,38 +1088,184 @@ function rebuildSessionIndex(agentId) {
   }
 }
 
+// Helper: parse JSON string or return as-is if already an object/array
+function _parseJsonSafe(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); }
+  catch { return value; }
+}
+
+// Convert raw messages (from SQLite or JSONL) to UI display format
+function _convertToUiMessages(messages) {
+  const uiMessages = [];
+  let seq = 0;
+  for (const m of messages) {
+    const ts = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
+    const content = typeof m.content === 'string' ? _parseJsonSafe(m.content) : m.content;
+
+    if (m.role === 'user') {
+      seq++;
+      const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map(c => c.text || '').join('') : '');
+      uiMessages.push({ uuid: `hist-user-${seq}`, role: 'user', content: text, created_at: ts, sequence: seq });
+    } else if (m.role === 'assistant') {
+      const parts = Array.isArray(content) ? content : [];
+      const textParts = parts.filter(c => c.type === 'text').map(c => c.text).join('');
+      const toolCalls = parts.filter(c => c.type === 'tool_call');
+      for (const tc of toolCalls) {
+        seq++;
+        uiMessages.push({
+          uuid: `hist-tc-${tc.id || seq}`, role: 'tool_use',
+          tool_use_id: tc.id, tool_name: tc.name, content: tc.input,
+          created_at: ts, sequence: seq,
+        });
+      }
+      if (textParts) {
+        seq++;
+        uiMessages.push({
+          uuid: `hist-asst-${seq}`, role: 'assistant',
+          content: [{ type: 'text', text: textParts }],
+          model: m.model || 'mobile-claw', created_at: ts, sequence: seq,
+        });
+      }
+    } else if (m.role === 'toolResult') {
+      seq++;
+      const text = Array.isArray(content) ? content.map(c => c.text || '').join('') : JSON.stringify(content);
+      uiMessages.push({
+        uuid: `hist-tr-${m.toolCallId || seq}`, role: 'tool_result',
+        tool_use_id: m.toolCallId, content: text,
+        is_error: m.isError || false, created_at: ts, sequence: seq,
+      });
+    }
+  }
+  return uiMessages;
+}
+
 function saveSession(agent, agentId, sessionKey, startTime) {
+  if (!isDbReady()) {
+    // Fallback to JSONL if DB not ready (should not happen in normal flow)
+    _saveSessionJsonlFallback(agent, agentId, sessionKey, startTime);
+    return;
+  }
+
+  const allMessages = agent.state.messages;
+  const usage = extractUsage(agent);
+
+  try {
+    dbTransaction(() => {
+      // Persist new messages since last save
+      for (let i = persistedMessageCount; i < allMessages.length; i++) {
+        const m = allMessages[i];
+        dbRun(
+          `INSERT OR IGNORE INTO messages
+           (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            sessionKey, i, m.role,
+            typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+            m.timestamp || null, m.model || null, m.toolCallId || null,
+            m.usage?.input || null, m.usage?.output || null,
+          ]
+        );
+      }
+
+      // Update session metadata atomically with messages
+      dbRun(
+        `INSERT OR REPLACE INTO sessions
+         (session_key, agent_id, created_at, updated_at, model, total_tokens, input_tokens, output_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          sessionKey, agentId, startTime, Date.now(),
+          'anthropic/claude-sonnet-4-5', usage.totalTokens,
+          usage.inputTokens, usage.outputTokens,
+        ]
+      );
+    });
+
+    persistedMessageCount = allMessages.length;
+    dbFlush(); // Atomic write to disk — survives OOM kill
+  } catch (err) {
+    console.warn(`[saveSession] SQLite save failed: ${err.message}`);
+    channel.send('message', {
+      type: 'agent.event',
+      eventType: 'persistence_warning',
+      data: { message: 'Failed to save session checkpoint — will retry', error: err.message },
+    });
+    // Do NOT increment persistedMessageCount — retry on next save
+  }
+}
+
+// Legacy fallback — only used if SQLite init fails
+function _saveSessionJsonlFallback(agent, agentId, sessionKey, startTime) {
   const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
   const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-
-  // Append only NEW messages since last save (delta)
   const allMessages = agent.state.messages;
   for (let i = persistedMessageCount; i < allMessages.length; i++) {
     nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
   }
   persistedMessageCount = allMessages.length;
-
-  // Update sessions.json index (atomic: write tmp then rename)
   const usage = extractUsage(agent);
   const sessionsJsonPath = join(sessionsDir, 'sessions.json');
   try {
     let index = {};
     try { index = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); } catch {
-      // Index missing or corrupt — rebuild from JSONL files
       index = rebuildSessionIndex(agentId);
     }
     if (!index[agentId]) index[agentId] = {};
     index[agentId][sessionKey] = {
-      sessionId: sessionKey,
-      createdAt: index[agentId][sessionKey]?.createdAt || startTime,
-      updatedAt: Date.now(),
-      model: 'anthropic/claude-sonnet-4-5',
-      totalTokens: usage.totalTokens,
+      sessionId: sessionKey, createdAt: startTime, updatedAt: Date.now(),
+      model: 'anthropic/claude-sonnet-4-5', totalTokens: usage.totalTokens,
     };
     const tmpPath = sessionsJsonPath + '.tmp';
     writeFileSync(tmpPath, JSON.stringify(index, null, 2));
     renameSync(tmpPath, sessionsJsonPath);
   } catch { /* non-fatal */ }
+}
+
+// ── Mid-turn checkpoint helper ────────────────────────────────────────────
+
+function _checkpointMessages(agent, agentId, sessionKey) {
+  if (!isDbReady()) {
+    // Fallback: append to JSONL
+    try {
+      const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
+      mkdirSync(sessionsDir, { recursive: true });
+      const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
+      const allMessages = agent.state.messages;
+      for (let i = persistedMessageCount; i < allMessages.length; i++) {
+        nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
+      }
+      persistedMessageCount = allMessages.length;
+    } catch { /* non-fatal */ }
+    return;
+  }
+
+  try {
+    const allMessages = agent.state.messages;
+    if (persistedMessageCount >= allMessages.length) return; // nothing new
+
+    dbTransaction(() => {
+      for (let i = persistedMessageCount; i < allMessages.length; i++) {
+        const m = allMessages[i];
+        dbRun(
+          `INSERT OR IGNORE INTO messages
+           (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            sessionKey, i, m.role,
+            typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+            m.timestamp || null, m.model || null, m.toolCallId || null,
+            m.usage?.input || null, m.usage?.output || null,
+          ]
+        );
+      }
+    });
+
+    persistedMessageCount = allMessages.length;
+    dbFlush(); // Atomic persist to disk
+  } catch (err) {
+    console.warn(`[checkpoint] SQLite checkpoint failed: ${err.message}`);
+    // Do NOT increment persistedMessageCount — retry on next checkpoint
+  }
 }
 
 // ── Error classification ─────────────────────────────────────────────────
@@ -1180,9 +1334,22 @@ When calling \`setup_complete\`, provide:
 
 All three files should be in Markdown format with clear sections.`;
 
+const LOCALE_LANGUAGE_NAMES = { en: 'English', es: 'Spanish' };
+
+const SETUP_KICKOFF_PROMPTS = {
+  en: 'Begin the setup interview. Greet the user warmly and start by asking their name.',
+  es: 'Comienza la entrevista de configuración. Saluda al usuario con calidez y empieza preguntándole su nombre.',
+};
+
+function buildSetupSystemPrompt(locale) {
+  if (!locale || locale === 'en') return SETUP_SYSTEM_PROMPT;
+  const lang = LOCALE_LANGUAGE_NAMES[locale] || 'English';
+  return SETUP_SYSTEM_PROMPT + `\n\n## Language\n\nYou MUST converse with the user entirely in ${lang}. All your messages, questions, and summaries must be in ${lang}. The generated configuration files (IDENTITY.md, MEMORY.md, SOUL.md) must also be written in ${lang}.`;
+}
+
 const setupMilestonesReached = new Set();
 
-async function runSetupSkill(agentId) {
+async function runSetupSkill(agentId, locale = 'en') {
   await refreshOAuthTokenIfNeeded(agentId);
   const authProfiles = loadAuthProfiles(agentId);
   const apiKey = resolveApiKey(authProfiles);
@@ -1235,9 +1402,9 @@ async function runSetupSkill(agentId) {
         const workspaceDir = join(OPENCLAW_ROOT, 'workspace');
         mkdirSync(workspaceDir, { recursive: true });
 
-        writeFileSync(join(workspaceDir, 'IDENTITY.md'), params.identity);
-        writeFileSync(join(workspaceDir, 'MEMORY.md'), params.memory);
-        writeFileSync(join(workspaceDir, 'SOUL.md'), params.soul);
+        atomicWrite(join(workspaceDir, 'IDENTITY.md'), params.identity);
+        atomicWrite(join(workspaceDir, 'MEMORY.md'), params.memory);
+        atomicWrite(join(workspaceDir, 'SOUL.md'), params.soul);
 
         // Emit completion to UI
         channel.send('message', {
@@ -1264,7 +1431,7 @@ async function runSetupSkill(agentId) {
   const sessionKey = `setup/${Date.now()}`;
   const agent = new Agent({
     initialState: {
-      systemPrompt: SETUP_SYSTEM_PROMPT,
+      systemPrompt: buildSetupSystemPrompt(locale),
       model,
       tools,
       thinkingLevel: 'off',
@@ -1283,23 +1450,14 @@ async function runSetupSkill(agentId) {
   agent.subscribe((event) => {
     bridgeEvent(event);
     if (event.type === 'tool_execution_end' && sessionKey) {
-      try {
-        const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-        mkdirSync(sessionsDir, { recursive: true });
-        const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-        const allMessages = agent.state.messages;
-        for (let i = persistedMessageCount; i < allMessages.length; i++) {
-          nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
-        }
-        persistedMessageCount = allMessages.length;
-      } catch { /* non-fatal */ }
+      _checkpointMessages(agent, agentId, sessionKey);
     }
   });
 
   // Kick off the setup conversation — agent speaks first
   const startTime = Date.now();
   try {
-    await agent.prompt('Begin the setup interview. Greet the user warmly and start by asking their name.');
+    await agent.prompt(SETUP_KICKOFF_PROMPTS[locale] || SETUP_KICKOFF_PROMPTS.en);
     await agent.waitForIdle();
 
     saveSession(agent, agentId, sessionKey, startTime);
@@ -1367,15 +1525,7 @@ async function runAgentLoop(agentId, sessionKey, prompt, requestedModel) {
     bridgeEvent(event);
     // Checkpoint after each tool execution (crash loses at most the current tool call)
     if (event.type === 'tool_execution_end' && sessionKey) {
-      try {
-        const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-        const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-        const allMessages = agent.state.messages;
-        for (let i = persistedMessageCount; i < allMessages.length; i++) {
-          nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
-        }
-        persistedMessageCount = allMessages.length;
-      } catch { /* non-fatal: full save will happen on turn completion */ }
+      _checkpointMessages(agent, agentId, sessionKey);
     }
   });
 
@@ -1575,7 +1725,8 @@ channel.addListener('message', async (event) => {
     case 'skill.start': {
       if (msg.skill === 'setup') {
         const agentId = msg.agentId || 'main';
-        await runSetupSkill(agentId);
+        const locale = msg.locale || 'en';
+        await runSetupSkill(agentId, locale);
       } else {
         channel.send('message', {
           type: 'agent.error',
@@ -1694,26 +1845,42 @@ channel.addListener('message', async (event) => {
 
     case 'session.list': {
       const agentId = msg.agentId || 'main';
-      const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
       let sessions = [];
-      try {
-        let raw;
-        try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
-        catch { raw = rebuildSessionIndex(agentId); }
-        // Index can be flat { sessionKey: {...} } or nested { agentId: { sessionKey: {...} } }
-        const entries = raw[agentId] || raw;
-        sessions = Object.values(entries)
-          .filter(s => s && typeof s === 'object' && s.sessionId)
-          .map(s => ({
-            sessionKey: s.sessionId,
-            sessionId: s.sessionId,
-            updatedAt: s.updatedAt || s.createdAt || 0,
+      if (isDbReady()) {
+        try {
+          sessions = dbQuery(
+            'SELECT session_key, agent_id, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC',
+            [agentId]
+          ).map(s => ({
+            sessionKey: s.session_key,
+            sessionId: s.session_key,
+            updatedAt: s.updated_at || s.created_at || 0,
             model: s.model,
-            totalTokens: s.totalTokens,
+            totalTokens: s.total_tokens,
           }));
-        sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      } catch {
-        // No sessions yet
+        } catch (err) {
+          console.warn(`[session.list] SQLite query failed: ${err.message}`);
+        }
+      }
+      // Fallback to sessions.json if SQLite empty or unavailable
+      if (sessions.length === 0) {
+        const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
+        try {
+          let raw;
+          try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
+          catch { raw = rebuildSessionIndex(agentId); }
+          const entries = raw[agentId] || raw;
+          sessions = Object.values(entries)
+            .filter(s => s && typeof s === 'object' && s.sessionId)
+            .map(s => ({
+              sessionKey: s.sessionId,
+              sessionId: s.sessionId,
+              updatedAt: s.updatedAt || s.createdAt || 0,
+              model: s.model,
+              totalTokens: s.totalTokens,
+            }));
+          sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        } catch { /* No sessions yet */ }
       }
       channel.send('message', { type: 'session.list.result', agentId, sessions });
       break;
@@ -1730,112 +1897,102 @@ channel.addListener('message', async (event) => {
     }
 
     case 'session.latest': {
-      // Returns the most recent session key from sessions.json
       const agentId = msg.agentId || 'main';
-      const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
-      try {
-        let raw;
-        try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
-        catch { raw = rebuildSessionIndex(agentId); }
-        const entries = raw[agentId] || raw;
-        const sorted = Object.values(entries)
-          .filter(s => s && typeof s === 'object' && s.sessionId)
-          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        const latest = sorted[0] || null;
-        channel.send('message', {
-          type: 'session.latest.result',
-          sessionKey: latest?.sessionId || null,
-          session: latest,
-        });
-      } catch {
-        channel.send('message', { type: 'session.latest.result', sessionKey: null, session: null });
+      let latest = null;
+      if (isDbReady()) {
+        try {
+          const row = dbQueryOne(
+            'SELECT session_key, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 1',
+            [agentId]
+          );
+          if (row) {
+            latest = {
+              sessionId: row.session_key,
+              sessionKey: row.session_key,
+              createdAt: row.created_at,
+              updatedAt: row.updated_at,
+              model: row.model,
+              totalTokens: row.total_tokens,
+            };
+          }
+        } catch { /* fall through to JSON fallback */ }
       }
+      // Fallback to sessions.json if SQLite has nothing
+      if (!latest) {
+        const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
+        try {
+          let raw;
+          try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
+          catch { raw = rebuildSessionIndex(agentId); }
+          const entries = raw[agentId] || raw;
+          const sorted = Object.values(entries)
+            .filter(s => s && typeof s === 'object' && s.sessionId)
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          latest = sorted[0] || null;
+        } catch { /* no sessions */ }
+      }
+      channel.send('message', {
+        type: 'session.latest.result',
+        sessionKey: latest?.sessionId || latest?.sessionKey || null,
+        session: latest,
+      });
       break;
     }
 
     case 'session.load': {
-      // Reads JSONL transcript and returns messages converted to UI format
       const agentId = msg.agentId || 'main';
       const sessionKey = msg.sessionKey;
       if (!sessionKey) {
         channel.send('message', { type: 'session.load.result', error: 'No sessionKey provided', messages: [] });
         break;
       }
-      const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-      const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-      try {
-        const raw = readFileSync(sessionFile, 'utf8');
-        const lines = raw.split('\n').filter(l => l.trim());
 
-        // Parse lines (skip corrupted), then deduplicate (handles legacy duplication bug)
-        const parsed = [];
-        for (const line of lines) {
-          try { parsed.push(JSON.parse(line)); }
-          catch { console.warn(`[session.load] Skipping corrupted JSONL line: ${line.substring(0, 80)}`); }
-        }
-        const messages = deduplicateMessages(parsed);
+      let rawMessages = null;
 
-        // Convert to UI message format
-        const uiMessages = [];
-        let seq = 0;
-        for (const m of messages) {
-          const ts = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
-
-          if (m.role === 'user') {
-            seq++;
-            const text = typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.map(c => c.text || '').join('') : '');
-            uiMessages.push({ uuid: `hist-user-${seq}`, role: 'user', content: text, created_at: ts, sequence: seq });
-          } else if (m.role === 'assistant') {
-            const content = m.content || [];
-            // Split assistant message: text blocks + tool_call blocks
-            const textParts = content.filter(c => c.type === 'text').map(c => c.text).join('');
-            const toolCalls = content.filter(c => c.type === 'tool_call');
-
-            // Emit tool_use entries first
-            for (const tc of toolCalls) {
-              seq++;
-              uiMessages.push({
-                uuid: `hist-tc-${tc.id || seq}`,
-                role: 'tool_use',
-                tool_use_id: tc.id,
-                tool_name: tc.name,
-                content: tc.input,
-                created_at: ts,
-                sequence: seq,
-              });
-            }
-
-            // Then emit text if present
-            if (textParts) {
-              seq++;
-              uiMessages.push({
-                uuid: `hist-asst-${seq}`,
-                role: 'assistant',
-                content: [{ type: 'text', text: textParts }],
-                model: m.model || 'mobile-claw',
-                created_at: ts,
-                sequence: seq,
-              });
-            }
-          } else if (m.role === 'toolResult') {
-            seq++;
-            const text = Array.isArray(m.content) ? m.content.map(c => c.text || '').join('') : JSON.stringify(m.content);
-            uiMessages.push({
-              uuid: `hist-tr-${m.toolCallId || seq}`,
-              role: 'tool_result',
-              tool_use_id: m.toolCallId,
-              content: text,
-              is_error: m.isError || false,
-              created_at: ts,
-              sequence: seq,
-            });
+      // Try SQLite first
+      if (isDbReady()) {
+        try {
+          const rows = dbQuery(
+            'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
+            [sessionKey]
+          );
+          if (rows.length > 0) {
+            rawMessages = rows.map(r => ({
+              role: r.role,
+              content: _parseJsonSafe(r.content),
+              timestamp: r.timestamp,
+              model: r.model,
+              toolCallId: r.tool_call_id,
+              usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
+            }));
           }
+        } catch (err) {
+          console.warn(`[session.load] SQLite query failed: ${err.message}`);
         }
-
-        channel.send('message', { type: 'session.load.result', sessionKey, messages: uiMessages });
-      } catch (err) {
-        channel.send('message', { type: 'session.load.result', sessionKey, error: err.message, messages: [] });
       }
+
+      // Fallback to JSONL if SQLite has nothing
+      if (!rawMessages) {
+        const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
+        const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
+        try {
+          const raw = readFileSync(sessionFile, 'utf8');
+          const lines = raw.split('\n').filter(l => l.trim());
+          const parsed = [];
+          for (const line of lines) {
+            try { parsed.push(JSON.parse(line)); }
+            catch { console.warn(`[session.load] Skipping corrupted JSONL line: ${line.substring(0, 80)}`); }
+          }
+          rawMessages = deduplicateMessages(parsed);
+        } catch (err) {
+          channel.send('message', { type: 'session.load.result', sessionKey, error: err.message, messages: [] });
+          break;
+        }
+      }
+
+      // Convert to UI message format
+      const uiMessages = _convertToUiMessages(rawMessages);
+      channel.send('message', { type: 'session.load.result', sessionKey, messages: uiMessages });
       break;
     }
 
@@ -1855,22 +2012,44 @@ channel.addListener('message', async (event) => {
         break;
       }
 
-      const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-      const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
       try {
-        const raw = readFileSync(sessionFile, 'utf8');
-        const lines = raw.split('\n').filter(l => l.trim());
-        const rawMessages = [];
-        for (const line of lines) {
-          try { rawMessages.push(JSON.parse(line)); }
-          catch { console.warn(`[session.resume] Skipping corrupted JSONL line`); }
+        // Load messages from SQLite first, fallback to JSONL
+        let agentMessages = null;
+        if (isDbReady()) {
+          try {
+            const rows = dbQuery(
+              'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
+              [sessionKey]
+            );
+            if (rows.length > 0) {
+              agentMessages = rows.map(r => ({
+                role: r.role,
+                content: _parseJsonSafe(r.content),
+                timestamp: r.timestamp,
+                model: r.model,
+                toolCallId: r.tool_call_id,
+                usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
+              }));
+            }
+          } catch { /* fall through to JSONL */ }
         }
-        const agentMessages = deduplicateMessages(rawMessages);
+
+        if (!agentMessages) {
+          const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
+          const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
+          const raw = readFileSync(sessionFile, 'utf8');
+          const lines = raw.split('\n').filter(l => l.trim());
+          const rawMessages = [];
+          for (const line of lines) {
+            try { rawMessages.push(JSON.parse(line)); }
+            catch { console.warn(`[session.resume] Skipping corrupted JSONL line`); }
+          }
+          agentMessages = deduplicateMessages(rawMessages);
+        }
 
         const systemPrompt = loadSystemPrompt();
         const model = getModel('anthropic', 'claude-sonnet-4-5');
 
-        // Merge local tools with MCP device tools (if bridge is available)
         const localTools = buildAgentTools();
         const mcpTools = await discoverMcpTools();
         const tools = [...localTools, ...mcpTools];
@@ -1949,23 +2128,34 @@ channel.addListener('message', async (event) => {
 
 ensureOpenClawDirs();
 
-// Pre-discover MCP device tools at startup (non-blocking, best-effort).
-// Results are cached so the first agent run doesn't wait for discovery.
-discoverMcpTools().then(tools => {
-  channel.send('message', {
-    type: 'worker.ready',
-    nodeVersion: process.version,
-    openclawRoot: OPENCLAW_ROOT,
-    mcpToolCount: tools.length,
+// Initialize SQLite, migrate legacy JSONL data, then start MCP discovery
+initWorkerDb(OPENCLAW_ROOT).then(() => {
+  // Migrate existing JSONL sessions into SQLite (one-time, idempotent)
+  try {
+    migrateFromJsonl(OPENCLAW_ROOT, 'main', deduplicateMessages);
+  } catch (err) {
+    console.warn(`[init] JSONL migration failed (non-fatal): ${err.message}`);
+  }
+}).catch(err => {
+  console.warn(`[init] SQLite init failed, using JSONL fallback: ${err.message}`);
+}).finally(() => {
+  // Pre-discover MCP device tools at startup (non-blocking, best-effort).
+  // Results are cached so the first agent run doesn't wait for discovery.
+  discoverMcpTools().then(tools => {
+    channel.send('message', {
+      type: 'worker.ready',
+      nodeVersion: process.version,
+      openclawRoot: OPENCLAW_ROOT,
+      mcpToolCount: tools.length,
+    });
+    console.log(`[mobile-claw worker] Ready. Node ${process.version}, root=${OPENCLAW_ROOT}, mcpTools=${tools.length}`);
+  }).catch(() => {
+    channel.send('message', {
+      type: 'worker.ready',
+      nodeVersion: process.version,
+      openclawRoot: OPENCLAW_ROOT,
+      mcpToolCount: 0,
+    });
+    console.log(`[mobile-claw worker] Ready (no MCP). Node ${process.version}, root=${OPENCLAW_ROOT}`);
   });
-  console.log(`[mobile-claw worker] Ready. Node ${process.version}, root=${OPENCLAW_ROOT}, mcpTools=${tools.length}`);
-}).catch(() => {
-  // MCP bridge not available — proceed without device tools
-  channel.send('message', {
-    type: 'worker.ready',
-    nodeVersion: process.version,
-    openclawRoot: OPENCLAW_ROOT,
-    mcpToolCount: 0,
-  });
-  console.log(`[mobile-claw worker] Ready (no MCP). Node ${process.version}, root=${OPENCLAW_ROOT}`);
 });
