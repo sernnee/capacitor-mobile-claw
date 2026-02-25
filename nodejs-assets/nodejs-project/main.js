@@ -1456,7 +1456,8 @@ async function runSetupSkill(agentId, locale = 'en', injectedConfig = null) {
   const mcpTools = await discoverMcpTools();
   const setupNames = new Set(setupTools.map(t => t.name));
   const filteredBase = baseTools.filter(t => !setupNames.has(t.name));
-  const tools = [...setupTools, ...filteredBase, ...mcpTools];
+  const filteredMcp = mcpTools.filter(t => !setupNames.has(t.name));
+  const tools = [...setupTools, ...filteredBase, ...filteredMcp];
 
   const sessionKey = `setup/${Date.now()}`;
   const agent = new Agent({
