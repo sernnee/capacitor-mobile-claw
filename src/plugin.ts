@@ -41,10 +41,6 @@ export class MobileClawWeb extends WebPlugin implements MobileClawPlugin {
     return this.engine.stopTurn()
   }
 
-  async approveTool(options: { toolCallId: string; approved: boolean }): Promise<void> {
-    return this.engine.approveTool(options.toolCallId, options.approved)
-  }
-
   async steerAgent(options: { text: string }): Promise<void> {
     return this.engine.steerAgent(options.text)
   }

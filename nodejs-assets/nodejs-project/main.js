@@ -10,7 +10,7 @@
  * - File tools (read/write/edit/find/grep/ls)
  * - Code execution (JS VM sandbox + Python Pyodide sandbox)
  * - Git tools (isomorphic-git)
- * - Approval gates (tool.approve / tool.approval_request)
+ * - Pre-execution hook (tool.pre_execute — consumer controls approval policy)
  * - Session management (JSONL transcripts)
  * - Auth profile management (auth-profiles.json)
  */
@@ -87,7 +87,14 @@ async function discoverMcpTools() {
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
     ]);
 
-    cachedMcpTools = buildMcpAgentTools(mcpBridge, mcpToolDescriptors);
+    const rawTools = buildMcpAgentTools(mcpBridge, mcpToolDescriptors);
+
+    // Wrap each MCP tool with the pre-execute hook (consumer decides approval policy)
+    cachedMcpTools = rawTools.map(tool => ({
+      ...tool,
+      execute: wrapWithPreExecuteHook(tool.name, tool.execute),
+    }));
+
     console.log(`[mobile-claw] Discovered ${cachedMcpTools.length} MCP device tools`);
     return cachedMcpTools;
   } catch (err) {
@@ -746,40 +753,42 @@ async function gitDiffTool(args) {
   }
 }
 
-// ── Approval gate (Phase 4) ──────────────────────────────────────────────
+// ── Pre-execution hook ───────────────────────────────────────────────────
+//
+// Fires a `tool.pre_execute` bridge event before every tool call, giving the
+// consumer (UI layer) full control over tool approval policy.
+//
+// The consumer can: allow (pass args through), deny (with reason), transform
+// args, or show its own approval UI before responding.
+//
+// Always enabled — if no consumer handler is registered, tools will be denied
+// after the TTL expires (safe-by-default).
 
-// Tools that require user approval before execution
-const APPROVAL_REQUIRED = new Set(['write_file', 'edit_file', 'execute_js', 'execute_python', 'git_commit']);
+// Map of toolCallId → resolver callback for pending pre-execute results
+const pendingPreExecuteHooks = new Map();
+const PRE_EXECUTE_TTL_MS = 120_000; // Auto-cancel after 2 minutes
 
-// Approval mode: 'permissive' = auto-approve all tools, 'interactive' = ask user
-let approvalMode = 'permissive';
-
-// Map of toolCallId → resolver callback for pending approvals
-const pendingApprovals = new Map();
-const APPROVAL_TTL_MS = 120_000; // Auto-deny after 2 minutes
-
-function waitForApproval(toolCallId, signal) {
+function waitForPreExecuteResult(toolCallId, toolName, signal) {
   return new Promise((resolve) => {
-    // TTL: auto-deny after 2 minutes if user doesn't respond
     const ttlTimer = setTimeout(() => {
-      if (pendingApprovals.has(toolCallId)) {
-        pendingApprovals.delete(toolCallId);
-        channel.send('message', { type: 'tool.approval_expired', toolCallId });
-        resolve(false);
+      if (pendingPreExecuteHooks.has(toolCallId)) {
+        pendingPreExecuteHooks.delete(toolCallId);
+        channel.send('message', { type: 'tool.pre_execute.expired', toolCallId, toolName });
+        resolve(null); // null = timed out
       }
-    }, APPROVAL_TTL_MS);
+    }, PRE_EXECUTE_TTL_MS);
 
-    pendingApprovals.set(toolCallId, (approved) => {
+    pendingPreExecuteHooks.set(toolCallId, (result) => {
       clearTimeout(ttlTimer);
-      resolve(approved);
+      resolve(result);
     });
 
     if (signal) {
       const onAbort = () => {
         clearTimeout(ttlTimer);
-        if (pendingApprovals.has(toolCallId)) {
-          pendingApprovals.delete(toolCallId);
-          resolve(false);
+        if (pendingPreExecuteHooks.has(toolCallId)) {
+          pendingPreExecuteHooks.delete(toolCallId);
+          resolve(null);
         }
       };
       signal.addEventListener('abort', onAbort, { once: true });
@@ -787,28 +796,45 @@ function waitForApproval(toolCallId, signal) {
   });
 }
 
-function wrapWithApproval(toolName, executeFn) {
+/**
+ * Pre-execution hook wrapper.
+ *
+ * Fires a `tool.pre_execute` bridge event before every tool call, giving the
+ * consumer (UI layer) full control over tool approval and argument transformation.
+ *
+ * The consumer MUST respond with `tool.pre_execute.result` to allow execution.
+ * If no handler is registered, tools will time out and be denied (safe-by-default).
+ */
+function wrapWithPreExecuteHook(toolName, executeFn) {
   return async (toolCallId, params, signal, onUpdate) => {
-    // Send approval request to UI
+    // Fire the hook — send tool args to the consumer for policy decision
     channel.send('message', {
-      type: 'tool.approval_request',
+      type: 'tool.pre_execute',
       toolCallId,
       toolName,
       args: params,
     });
 
-    // Wait for approval response from UI
-    const approved = await waitForApproval(toolCallId, signal);
+    // Wait for the client to respond with (optionally transformed) args
+    const result = await waitForPreExecuteResult(toolCallId, toolName, signal);
 
-    if (!approved) {
+    if (!result) {
+      // Timed out or aborted
       return {
-        content: [{ type: 'text', text: 'Tool execution denied by user.' }],
-        details: { denied: true },
+        content: [{ type: 'text', text: `Pre-execution hook timed out for tool "${toolName}". The tool was not executed.` }],
+        details: { denied: true, reason: 'pre_execute_timeout' },
       };
     }
 
-    // Execute the actual tool
-    return executeFn(toolCallId, params, signal, onUpdate);
+    if (result.deny) {
+      return {
+        content: [{ type: 'text', text: result.denyReason || `Tool "${toolName}" execution was denied by the client.` }],
+        details: { denied: true, reason: result.denyReason || 'client_denied' },
+      };
+    }
+
+    // Execute the tool with the (possibly transformed) args
+    return executeFn(toolCallId, result.args, signal, onUpdate);
   };
 }
 
@@ -851,6 +877,30 @@ function loadSystemPrompt() {
 
   if (!systemPrompt) {
     systemPrompt = 'You are a helpful AI assistant running on a mobile device.';
+  }
+
+  // Append vault alias awareness when the pre-execute hook is active
+  if (preExecuteHookEnabled) {
+    systemPrompt += `
+## Vault Aliases
+
+The user may provide sensitive information that has been replaced with vault aliases in the format \`{{VAULT:<type>_<hash>}}\`.
+Examples: \`{{VAULT:cc_4521}}\`, \`{{VAULT:ssn_a3f1}}\`, \`{{VAULT:email_c9d3}}\`, \`{{VAULT:pwd_b7e2}}\`
+
+These are SECURE REFERENCES to real values (credit cards, social security numbers, emails, passwords, API keys, etc.) stored in the device's hardware-encrypted vault (iOS Keychain / Android Keystore).
+
+**How to use vault aliases:**
+- When you need to use a vaulted value in a tool call, include the alias as-is in the tool arguments
+- The system will automatically resolve aliases to real values before the tool executes, after the user authorizes biometrically
+- Use aliases naturally in your responses: "I'll use your card {{VAULT:cc_4521}} for the payment"
+- The user sees the original data on their end; the aliases are only visible to you
+
+**What NOT to do:**
+- Do not try to guess or infer what a vault alias contains
+- Do not ask the user to re-enter sensitive data that was already vaulted
+- Do not persist vault aliases to files or memory — they are ephemeral session references
+- Do not attempt to decode, reverse, or manipulate the alias format
+`;
   }
 
   return systemPrompt;
@@ -1000,12 +1050,10 @@ function buildAgentTools() {
     },
   ];
 
-  // Wrap tools that require approval (skipped in permissive mode)
+  // Wrap all tools with pre-execute hook (consumer decides approval policy)
   return toolDefs.map(tool => ({
     ...tool,
-    execute: (approvalMode === 'interactive' && APPROVAL_REQUIRED.has(tool.name))
-      ? wrapWithApproval(tool.name, tool.execute)
-      : tool.execute,
+    execute: wrapWithPreExecuteHook(tool.name, tool.execute),
   }));
 }
 
@@ -1778,11 +1826,11 @@ channel.addListener('message', async (event) => {
       break;
     }
 
-    case 'tool.approve': {
-      const resolver = pendingApprovals.get(msg.toolCallId);
+    case 'tool.pre_execute.result': {
+      const resolver = pendingPreExecuteHooks.get(msg.toolCallId);
       if (resolver) {
-        pendingApprovals.delete(msg.toolCallId);
-        resolver(msg.approved !== false);
+        pendingPreExecuteHooks.delete(msg.toolCallId);
+        resolver({ args: msg.args, deny: msg.deny, denyReason: msg.denyReason });
       }
       break;
     }
@@ -1851,12 +1899,6 @@ channel.addListener('message', async (event) => {
         profiles.lastGood[provider] = profileKey;
         saveAuthProfiles('main', profiles);
         channel.send('message', { type: 'config.update.result', success: true });
-      } else if (action === 'setApprovalMode') {
-        const mode = msg.config.mode;
-        if (mode === 'permissive' || mode === 'interactive') {
-          approvalMode = mode;
-          channel.send('message', { type: 'config.update.result', success: true, approvalMode: mode });
-        }
       } else if (action === 'setOAuth') {
         const profiles = loadAuthProfiles('main');
         const profileKey = `${provider}:oauth`;

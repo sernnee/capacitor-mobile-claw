@@ -5,6 +5,9 @@
  * It manages the embedded Node.js worker, bridge communication,
  * MCP server lifecycle, and exposes all plugin API methods.
  *
+ * Tool approval policy is NOT handled here — the consumer controls
+ * policy via the pre-execution hook (tool.pre_execute events).
+ *
  * No Vue, React, or any UI framework dependency.
  */
 
@@ -187,7 +190,7 @@ export class MobileClawEngine {
           handler(msg)
         }
       : handler
-    this.listeners.get(type)!.add(wrapped)
+    this.listeners.get(type)?.add(wrapped)
     return () => this.listeners.get(type)?.delete(wrapped)
   }
 
@@ -248,8 +251,23 @@ export class MobileClawEngine {
     await this.send({ type: 'agent.stop' })
   }
 
-  async approveTool(toolCallId: string, approved: boolean): Promise<void> {
-    await this.send({ type: 'tool.approve', toolCallId, approved })
+  /**
+   * Respond to a pre-execution hook event.
+   * The consumer calls this to allow, deny, or transform tool arguments.
+   */
+  async respondToPreExecute(
+    toolCallId: string,
+    args: Record<string, unknown>,
+    deny?: boolean,
+    denyReason?: string,
+  ): Promise<void> {
+    await this.send({
+      type: 'tool.pre_execute.result',
+      toolCallId,
+      args,
+      ...(deny && { deny }),
+      ...(denyReason && { denyReason }),
+    })
   }
 
   async steerAgent(text: string): Promise<void> {
@@ -365,7 +383,8 @@ export class MobileClawEngine {
     agentEvent: 'agent.event',
     agentCompleted: 'agent.completed',
     agentError: 'agent.error',
-    toolApprovalRequest: 'tool.approval_request',
+    toolPreExecute: 'tool.pre_execute',
+    toolPreExecuteExpired: 'tool.pre_execute.expired',
     workerReady: 'worker.ready',
   }
 

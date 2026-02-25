@@ -40,6 +40,8 @@ export type {
   AgentStopMessage,
   NodeToUIMessage,
   ReadyMessage,
-  ToolApprovalRequestMessage,
+  ToolPreExecuteExpiredMessage,
+  ToolPreExecuteMessage,
+  ToolPreExecuteResultMessage,
   UIToNodeMessage,
 } from './services/bridge-protocol'

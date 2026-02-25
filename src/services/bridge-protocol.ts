@@ -18,12 +18,6 @@ export interface AgentStopMessage {
   type: 'agent.stop'
 }
 
-export interface ToolApproveMessage {
-  type: 'tool.approve'
-  toolCallId: string
-  approved: boolean
-}
-
 export interface AgentSteerMessage {
   type: 'agent.steer'
   text: string
@@ -80,10 +74,26 @@ export interface SkillStartMessage {
   }
 }
 
+// ── Pre-execution hook (UI → Node.js) ─────────────────────────────────────
+
+/**
+ * Consumer responds to a pre-execution hook with (optionally transformed) args.
+ * The worker will use these args for the actual tool execution.
+ *
+ * Set `deny: true` to cancel the tool execution entirely (e.g. approval denied,
+ * biometric auth failed, or any policy-based rejection).
+ */
+export interface ToolPreExecuteResultMessage {
+  type: 'tool.pre_execute.result'
+  toolCallId: string
+  args: Record<string, unknown>
+  deny?: boolean
+  denyReason?: string
+}
+
 export type UIToNodeMessage =
   | AgentStartMessage
   | AgentStopMessage
-  | ToolApproveMessage
   | AgentSteerMessage
   | ConfigUpdateMessage
   | ConfigStatusMessage
@@ -92,6 +102,7 @@ export type UIToNodeMessage =
   | FileReadMessage
   | FileWriteMessage
   | SkillStartMessage
+  | ToolPreExecuteResultMessage
 
 // ── Node.js → UI ────────────────────────────────────────────────────────────
 
@@ -116,13 +127,6 @@ export interface AgentErrorMessage {
   type: 'agent.error'
   error: string
   code?: string
-}
-
-export interface ToolApprovalRequestMessage {
-  type: 'tool.approval_request'
-  toolCallId: string
-  toolName: string
-  args: Record<string, unknown>
 }
 
 export interface ReadyMessage {
@@ -161,13 +165,41 @@ export interface SessionClearResultMessage {
   success: boolean
 }
 
+// ── Pre-execution hook (Node.js → UI) ─────────────────────────────────────
+
+/**
+ * Worker fires this before every tool execution, giving the consumer full
+ * control over tool approval policy and argument transformation.
+ *
+ * The consumer MUST respond with `tool.pre_execute.result` to allow execution.
+ * If no handler responds, the tool will be denied after the TTL expires
+ * (safe-by-default).
+ */
+export interface ToolPreExecuteMessage {
+  type: 'tool.pre_execute'
+  toolCallId: string
+  toolName: string
+  args: Record<string, unknown>
+}
+
+/**
+ * Worker notifies UI that a pre-execution hook timed out (2-min TTL).
+ * The tool execution is cancelled.
+ */
+export interface ToolPreExecuteExpiredMessage {
+  type: 'tool.pre_execute.expired'
+  toolCallId: string
+  toolName: string
+}
+
 export type NodeToUIMessage =
   | AgentEventMessage
   | AgentCompletedMessage
   | AgentErrorMessage
-  | ToolApprovalRequestMessage
   | ReadyMessage
   | SessionListResultMessage
   | FileReadResultMessage
   | ConfigStatusResultMessage
   | SessionClearResultMessage
+  | ToolPreExecuteMessage
+  | ToolPreExecuteExpiredMessage

@@ -5,6 +5,9 @@
  * on-device via Capacitor-NodeJS. The agent has file tools, code
  * execution, git integration, and 64+ MCP device tools.
  *
+ * Tool approval policy is NOT handled by this plugin — the consumer
+ * controls policy via the pre-execution hook (tool.pre_execute events).
+ *
  * Usage:
  *   import { MobileClaw } from 'capacitor-mobile-claw'
  *
@@ -40,11 +43,6 @@ export interface MobileClawPlugin {
    * Stop the currently running agent turn.
    */
   stopTurn(): Promise<void>
-
-  /**
-   * Approve or deny a tool execution request from the agent.
-   */
-  approveTool(options: { toolCallId: string; approved: boolean }): Promise<void>
 
   /**
    * Send a steering/follow-up message to a running agent turn.
@@ -216,13 +214,20 @@ export interface ToolInvokeResult {
 
 // ── Events ─────────────────────────────────────────────────────────────────
 
-export type MobileClawEventName = 'agentEvent' | 'agentCompleted' | 'agentError' | 'toolApprovalRequest' | 'workerReady'
+export type MobileClawEventName =
+  | 'agentEvent'
+  | 'agentCompleted'
+  | 'agentError'
+  | 'toolPreExecute'
+  | 'toolPreExecuteExpired'
+  | 'workerReady'
 
 export type MobileClawEvent =
   | AgentEvent
   | AgentCompletedEvent
   | AgentErrorEvent
-  | ToolApprovalRequestEvent
+  | ToolPreExecuteEvent
+  | ToolPreExecuteExpiredEvent
   | WorkerReadyEvent
 
 export interface AgentEvent {
@@ -245,10 +250,15 @@ export interface AgentErrorEvent {
   code?: string
 }
 
-export interface ToolApprovalRequestEvent {
+export interface ToolPreExecuteEvent {
   toolCallId: string
   toolName: string
   args: Record<string, unknown>
+}
+
+export interface ToolPreExecuteExpiredEvent {
+  toolCallId: string
+  toolName: string
 }
 
 export interface WorkerReadyEvent {

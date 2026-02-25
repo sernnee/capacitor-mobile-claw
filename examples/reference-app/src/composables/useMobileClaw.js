@@ -52,9 +52,9 @@ async function _doInit() {
       error.value = engine.error
     })
 
-    // ── Unrestricted mode: auto-approve all tool requests ──────────
-    engine.onMessage('tool.approval_request', (msg) => {
-      engine.approveTool(msg.toolCallId, true)
+    // ── Unrestricted mode: auto-approve all tool calls via pre-execute hook ──
+    engine.onMessage('tool.pre_execute', (msg) => {
+      engine.respondToPreExecute(msg.toolCallId, msg.args)
     })
 
     await engine.init()
@@ -94,10 +94,6 @@ function getSessionKey() {
 
 async function stopTurn() {
   return engine.stopTurn()
-}
-
-async function approveTool(toolCallId, approved) {
-  return engine.approveTool(toolCallId, approved)
 }
 
 async function updateConfig(config) {
@@ -157,7 +153,6 @@ export function useMobileClaw() {
     // Agent control
     sendMessage,
     stopTurn,
-    approveTool,
     updateConfig,
 
     // File operations
