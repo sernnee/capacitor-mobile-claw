@@ -1841,16 +1841,9 @@ channel.addListener('message', async (event) => {
     }
 
     case 'skill.start': {
-      if (msg.skill === 'setup') {
-        const agentId = msg.agentId || 'main';
-        const locale = msg.locale || 'en';
-        await runSetupSkill(agentId, locale, msg.config || null);
-      } else {
-        channel.send('message', {
-          type: 'agent.error',
-          error: `Unknown skill: ${msg.skill}`,
-        });
-      }
+      const agentId = msg.agentId || 'main';
+      const locale = msg.locale || 'en';
+      await runSetupSkill(agentId, locale, msg.config || null);
       break;
     }
 
