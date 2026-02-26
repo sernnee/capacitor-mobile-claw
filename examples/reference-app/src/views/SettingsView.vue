@@ -163,6 +163,129 @@
         </div>
       </div>
 
+      <!-- Memory -->
+      <SettingsGroup label="MEMORY">
+        <SettingsRow
+          label="OpenAI Embedding Key"
+          :subtitle="embeddingKeyStatus"
+          :clickable="true"
+          :show-chevron="true"
+          icon-color="bg-sky-500/15 text-sky-400"
+          @click="showEmbeddingKeyDialog = true"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+          </template>
+          <template #right>
+            <span v-if="hasEmbeddingKey" class="text-xs text-emerald-400">Configured</span>
+            <span v-else class="text-xs text-muted-foreground/50">Local hash</span>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          label="Auto-Recall"
+          subtitle="Inject relevant memories before each turn"
+          icon-color="bg-violet-500/15 text-violet-400"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </template>
+          <template #right>
+            <button
+              @click="toggleAutoRecall"
+              class="w-10 h-6 rounded-full relative transition-colors duration-200"
+              :class="autoRecall ? 'bg-primary' : 'bg-muted-foreground/30'"
+            >
+              <span
+                class="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200"
+                :class="autoRecall ? 'translate-x-[18px]' : 'translate-x-0.5'"
+              />
+            </button>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          label="Auto-Capture"
+          subtitle="Detect and store memorable user content"
+          icon-color="bg-pink-500/15 text-pink-400"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
+            </svg>
+          </template>
+          <template #right>
+            <button
+              @click="toggleAutoCapture"
+              class="w-10 h-6 rounded-full relative transition-colors duration-200"
+              :class="autoCapture ? 'bg-primary' : 'bg-muted-foreground/30'"
+            >
+              <span
+                class="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200"
+                :class="autoCapture ? 'translate-x-[18px]' : 'translate-x-0.5'"
+              />
+            </button>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          label="Stored Memories"
+          :subtitle="`${memoryCount} entries in vector database`"
+          icon-color="bg-emerald-500/15 text-emerald-400"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <ellipse cx="12" cy="5" rx="9" ry="3"/>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+            </svg>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          label="Re-index Files"
+          subtitle="Re-chunk MEMORY.md + memory/*.md into vector search"
+          :clickable="true"
+          icon-color="bg-orange-500/15 text-orange-400"
+          @click="handleReindex"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
+            </svg>
+          </template>
+          <template #right>
+            <span v-if="indexing" class="text-xs text-amber-400">Indexing...</span>
+          </template>
+        </SettingsRow>
+        <SettingsRow
+          label="Clear All Memories"
+          subtitle="Delete all vector memories. File-based memory is preserved."
+          :clickable="true"
+          :destructive="true"
+          @click="confirmClearMemories"
+        >
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+              <line x1="10" y1="11" x2="10" y2="17"/>
+              <line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+          </template>
+        </SettingsRow>
+      </SettingsGroup>
+
       <!-- Session History -->
       <SettingsGroup label="SESSIONS">
         <SettingsRow
@@ -253,6 +376,56 @@
       </div>
     </Teleport>
 
+    <!-- Embedding Key Dialog (overlay) -->
+    <Teleport to="body">
+      <div v-if="showEmbeddingKeyDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="showEmbeddingKeyDialog = false" />
+        <div class="relative bg-card border border-border/50 rounded-2xl shadow-2xl w-full max-w-sm p-5 space-y-4">
+          <div>
+            <h3 class="text-base font-semibold text-foreground">Embedding API Key</h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              OpenAI key for text-embedding-3-small. Leave blank to use the local hash fallback (lower quality, fully offline).
+            </p>
+          </div>
+          <input
+            v-model="embeddingKeyInput"
+            type="password"
+            placeholder="sk-..."
+            class="w-full px-3 py-2.5 rounded-lg bg-secondary border border-border/50
+                   text-sm text-foreground font-mono
+                   placeholder:text-muted-foreground/40
+                   focus:outline-none focus:ring-2 focus:ring-primary/50"
+          />
+          <div class="flex gap-2 justify-end">
+            <button
+              v-if="hasEmbeddingKey"
+              @click="removeEmbeddingKey"
+              class="px-4 py-2 rounded-lg text-sm font-medium text-destructive
+                     border border-border/50 hover:bg-destructive/10 transition-colors mr-auto"
+            >
+              Remove
+            </button>
+            <button
+              @click="showEmbeddingKeyDialog = false"
+              class="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground
+                     border border-border/50 hover:bg-foreground/[0.04] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              @click="saveEmbeddingKey"
+              :disabled="!embeddingKeyInput.trim()"
+              class="px-4 py-2 rounded-lg text-sm font-medium
+                     bg-primary text-primary-foreground hover:bg-primary/90
+                     disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- Sessions Dialog (overlay) -->
     <Teleport to="body">
       <div v-if="showSessionsDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -286,6 +459,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMobileClaw } from '@/composables/useMobileClaw'
+import { useMemory } from '@/composables/useMemory'
 import SettingsGroup from '@/components/settings/SettingsGroup.vue'
 import SettingsRow from '@/components/settings/SettingsRow.vue'
 
@@ -294,7 +468,13 @@ const {
   workerReady, nodeVersion,
   readFile, writeFile, updateConfig,
   getAuthStatus, listSessions, clearConversation,
+  invokeTool,
 } = useMobileClaw()
+
+const {
+  memoryCount, indexing, initialized: memoryInitialized,
+  updateMemoryConfig, clearMemories, reindex, loadSavedConfig, refreshCount,
+} = useMemory()
 
 // ── Navigation ───────────────────────────────────────────────────────────────
 
@@ -458,12 +638,74 @@ async function confirmClear() {
   }
 }
 
+// ── Memory Settings ──────────────────────────────────────────────────────────
+
+const showEmbeddingKeyDialog = ref(false)
+const embeddingKeyInput = ref('')
+const hasEmbeddingKey = ref(false)
+const autoRecall = ref(true)
+const autoCapture = ref(true)
+
+const embeddingKeyStatus = computed(() => {
+  if (hasEmbeddingKey.value) return 'OpenAI text-embedding-3-small'
+  return 'Local hash fallback (offline)'
+})
+
+function loadMemorySettings() {
+  const config = loadSavedConfig()
+  hasEmbeddingKey.value = !!config.openaiApiKey
+  autoRecall.value = config.autoRecall !== false
+  autoCapture.value = config.autoCapture !== false
+}
+
+function saveEmbeddingKey() {
+  const key = embeddingKeyInput.value.trim()
+  if (!key) return
+  updateMemoryConfig({ openaiApiKey: key })
+  hasEmbeddingKey.value = true
+  embeddingKeyInput.value = ''
+  showEmbeddingKeyDialog.value = false
+}
+
+function removeEmbeddingKey() {
+  updateMemoryConfig({ openaiApiKey: undefined })
+  hasEmbeddingKey.value = false
+  embeddingKeyInput.value = ''
+  showEmbeddingKeyDialog.value = false
+}
+
+function toggleAutoRecall() {
+  autoRecall.value = !autoRecall.value
+  updateMemoryConfig({ autoRecall: autoRecall.value })
+}
+
+function toggleAutoCapture() {
+  autoCapture.value = !autoCapture.value
+  updateMemoryConfig({ autoCapture: autoCapture.value })
+}
+
+async function handleReindex() {
+  if (!workerReady.value) return
+  await reindex(
+    (path) => readFile(path),
+    (name, args) => invokeTool(name, args),
+  )
+}
+
+async function confirmClearMemories() {
+  if (confirm('Clear all vector memories? File-based memory (MEMORY.md) is preserved.')) {
+    await clearMemories()
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 watch(workerReady, (ready) => {
   if (ready) {
     loadAuthStatus()
     loadFile()
+    loadMemorySettings()
+    refreshCount()
   }
 }, { immediate: true })
 </script>

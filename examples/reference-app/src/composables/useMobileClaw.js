@@ -5,15 +5,18 @@
  * - Auto-approve all tool requests (unrestricted mode)
  * - No MCP state management
  * - No backend/auth integration
+ * - Memory system integration (auto-recall, auto-capture, agent tools)
  */
 
 import { ref } from 'vue'
 import { MobileClawEngine } from 'capacitor-mobile-claw'
 import { isNative } from '@/lib/platform.js'
+import { useMemory } from './useMemory.js'
 
 // ── Module-level singleton ───────────────────────────────────────────────
 
 const engine = new MobileClawEngine()
+const { memory, initMemory, reindex, loadSavedConfig } = useMemory()
 
 const available = ref(false)
 const workerReady = ref(false)
@@ -23,6 +26,7 @@ const loading = ref(false)
 const error = ref(null)
 
 let initPromise = null
+let lastUserPrompt = null
 
 // ── Init ─────────────────────────────────────────────────────────────────
 
@@ -57,7 +61,16 @@ async function _doInit() {
       engine.respondToPreExecute(msg.toolCallId, msg.args)
     })
 
-    await engine.init()
+    // ── Initialize memory system ──
+    const savedConfig = loadSavedConfig()
+    await initMemory(savedConfig)
+
+    // Pass memory tools to engine init so the agent can use them
+    const memoryTools = memory.getTools()
+    await engine.init({ tools: memoryTools })
+
+    // Set readFile for memory_get tool
+    memory.setReadFile((path) => engine.readFile(path))
 
     // Sync state after init resolves
     available.value = engine.available
@@ -66,6 +79,20 @@ async function _doInit() {
     openclawRoot.value = engine.openclawRoot
     loading.value = engine.loading
     error.value = engine.error
+
+    // ── Index workspace memory files (non-blocking) ──
+    reindex(
+      (path) => engine.readFile(path),
+      (name, args) => engine.invokeTool(name, args),
+    ).catch(() => { /* non-fatal */ })
+
+    // ── Auto-capture on agent completion ──
+    engine.onMessage('agent.completed', async () => {
+      if (lastUserPrompt) {
+        await memory.capture(lastUserPrompt).catch(() => {})
+        lastUserPrompt = null
+      }
+    })
   } catch (e) {
     available.value = false
     error.value = `Init failed: ${e.message}`
@@ -80,7 +107,16 @@ function onMessage(type, handler, opts = {}) {
 }
 
 async function sendMessage(prompt, agentId = 'main') {
-  const result = await engine.sendMessage(prompt, agentId)
+  lastUserPrompt = prompt
+
+  // ── Auto-recall: inject relevant memories ──
+  let enrichedPrompt = prompt
+  try {
+    const context = await memory.recall(prompt)
+    if (context) enrichedPrompt = context + '\n\n' + prompt
+  } catch { /* non-fatal — send without context */ }
+
+  const result = await engine.sendMessage(enrichedPrompt, agentId)
   return result.sessionKey
 }
 
@@ -132,6 +168,10 @@ async function resumeSession(sessionKey, agentId = 'main') {
   return engine.resumeSession(sessionKey, agentId)
 }
 
+async function invokeTool(toolName, args = {}) {
+  return engine.invokeTool(toolName, args)
+}
+
 // ── Public composable ────────────────────────────────────────────────────
 
 export function useMobileClaw() {
@@ -171,5 +211,6 @@ export function useMobileClaw() {
 
     // Low-level bridge
     onMessage,
+    invokeTool,
   }
 }
