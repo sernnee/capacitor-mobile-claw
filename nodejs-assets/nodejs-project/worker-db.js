@@ -113,7 +113,14 @@ export async function initWorkerDb(openclawRoot) {
   dbPath = join(openclawRoot, 'mobile-claw.db');
   mkdirSync(openclawRoot, { recursive: true });
 
-  // Load sql.js — try WASM first, fall back to asm.js (pure JS)
+  // Load sql.js — skip entirely if WebAssembly is unavailable (Capacitor-NodeJS v18)
+  // sql.js's WASM and asm.js builds both use Emscripten which references WebAssembly
+  // globals at load time, so we can't even require() it without a real WASM runtime.
+  // The caller (main.js) falls back to JSONL persistence when initWorkerDb throws.
+  if (typeof WebAssembly === 'undefined' || globalThis.WebAssembly?._isStub) {
+    throw new Error('WebAssembly is not available — using JSONL fallback');
+  }
+
   let SQL;
   try {
     const initSqlJs = _require('sql.js');

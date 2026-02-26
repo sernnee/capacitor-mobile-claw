@@ -15,8 +15,14 @@
  * - Auth profile management (auth-profiles.json)
  */
 
+// ── fetch() polyfill — MUST be first import ─────────────────────────────
+// Replaces the broken undici-based built-in fetch (requires WebAssembly)
+// with a native https/http implementation. Being a separate module imported
+// first ensures globalThis.fetch is replaced before any dependency evaluates.
+import './fetch-polyfill.js';
+
 // ── Node.js v18 polyfills (Capacitor-NodeJS ships v18.20.4) ──────────────
-// undici and Anthropic SDK expect globals that only exist in Node.js >=20.
+// Anthropic SDK expects globals that only exist in Node.js >=20.
 import { Blob } from 'node:buffer';
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = class File extends Blob {
@@ -569,25 +575,13 @@ function executeJsTool(args) {
 }
 
 // ── Python execution (Phase 5) ───────────────────────────────────────────
+// Pyodide requires WebAssembly which is disabled in Capacitor-NodeJS v18.
+// Stub it out — execute_python returns a clear error message.
 
-import { loadPyodide } from 'pyodide';
-
-let pyodideInstance = null;
+// import { loadPyodide } from 'pyodide';  // DISABLED: requires WebAssembly
 
 async function getPyodide() {
-  if (!pyodideInstance) {
-    pyodideInstance = await loadPyodide();
-    // Block dangerous modules for sandbox security
-    pyodideInstance.runPython(`
-import sys
-for _mod in ['subprocess', 'socket', 'http', 'urllib', 'ftplib', 'smtplib',
-             'webbrowser', 'ctypes', 'multiprocessing', 'shutil', 'tempfile',
-             'signal', 'resource']:
-    sys.modules[_mod] = None
-del _mod
-`);
-  }
-  return pyodideInstance;
+  throw new Error('Python execution is unavailable: WebAssembly is disabled in this Node.js runtime.');
 }
 
 async function executePythonTool(args) {
