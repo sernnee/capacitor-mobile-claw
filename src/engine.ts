@@ -11,6 +11,7 @@
  * No Vue, React, or any UI framework dependency.
  */
 
+import { Capacitor } from '@capacitor/core'
 import type {
   AuthStatus,
   FileReadResult,
@@ -85,8 +86,6 @@ export class MobileClawEngine {
   }
 
   private async _doInit(options: MobileClawInitOptions): Promise<MobileClawReadyInfo> {
-    const { Capacitor } = await import('@capacitor/core')
-
     if (!Capacitor.isNativePlatform()) {
       this._available = false
       this._error = 'MobileClaw only works on native platforms (Android/iOS)'
@@ -107,6 +106,12 @@ export class MobileClawEngine {
         const msg = event?.args?.[0] ?? event
         if (!msg || !msg.type) return
         this._dispatch(msg)
+      })
+
+      this._onMessage('worker.tools_updated', (msg) => {
+        if (msg?.mcpToolCount == null) return
+        this._mcpToolCount = msg.mcpToolCount
+        console.log(`[MobileClaw] Tools updated — ${this._mcpToolCount} MCP tools`)
       })
 
       // Set up worker.ready promise before MCP init (captures early ready events)
@@ -280,10 +285,10 @@ export class MobileClawEngine {
     await this.send({ type: 'config.update', config })
   }
 
-  async exchangeOAuthCode(tokenUrl: string, body: Record<string, string>): Promise<any> {
+  async exchangeOAuthCode(tokenUrl: string, body: Record<string, string>, contentType?: string): Promise<any> {
     return new Promise((resolve) => {
       this._onMessage('oauth.exchange.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'oauth.exchange', tokenUrl, body })
+      this.send({ type: 'oauth.exchange', tokenUrl, body, ...(contentType ? { contentType } : {}) })
     })
   }
 

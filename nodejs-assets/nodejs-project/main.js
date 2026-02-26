@@ -72,35 +72,51 @@ const mcpBridge = initMcpBridge(channel);
 
 // Cache for discovered MCP tools — avoids re-discovery on every agent run
 let cachedMcpTools = null;
+let discoveryPromise = null;
+// Epoch incremented on invalidation — prevents a stale in-flight discovery
+// from overwriting the cache after mcp.tools.invalidate fires.
+let discoveryEpoch = 0;
 
 /**
  * Discover MCP device tools from the WebView server.
  * Returns AgentTool[] or empty array if bridge is not available.
- * Uses a 3-second timeout for graceful degradation.
+ * Uses a 10-second timeout for graceful degradation.
+ * Concurrent callers share the same in-flight promise (no duplicate timeouts).
  */
 async function discoverMcpTools() {
   if (cachedMcpTools) return cachedMcpTools;
+  if (discoveryPromise) return discoveryPromise;
 
-  try {
-    const mcpToolDescriptors = await Promise.race([
-      mcpBridge.listTools(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
-    ]);
+  const epoch = discoveryEpoch; // Capture epoch before async work
 
-    const rawTools = buildMcpAgentTools(mcpBridge, mcpToolDescriptors);
+  discoveryPromise = (async () => {
+    try {
+      const mcpToolDescriptors = await Promise.race([
+        mcpBridge.listTools(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
+      ]);
 
-    // Wrap each MCP tool with the pre-execute hook (consumer decides approval policy)
-    cachedMcpTools = rawTools.map(tool => ({
-      ...tool,
-      execute: wrapWithPreExecuteHook(tool.name, tool.execute),
-    }));
+      const rawTools = buildMcpAgentTools(mcpBridge, mcpToolDescriptors);
 
-    console.log(`[mobile-claw] Discovered ${cachedMcpTools.length} MCP device tools`);
-    return cachedMcpTools;
-  } catch (err) {
-    console.warn(`[mobile-claw] MCP bridge not available, using local tools only: ${err.message}`);
-    return [];
-  }
+      // Only cache if the epoch hasn't changed (no invalidation while discovering)
+      if (epoch === discoveryEpoch) {
+        cachedMcpTools = rawTools.map(tool => ({
+          ...tool,
+          execute: wrapWithPreExecuteHook(tool.name, tool.execute),
+        }));
+        console.log(`[mobile-claw] Discovered ${cachedMcpTools.length} MCP device tools`);
+      }
+
+      return cachedMcpTools ?? [];
+    } catch (err) {
+      console.warn(`[mobile-claw] MCP bridge not available, using local tools only: ${err.message}`);
+      return [];
+    } finally {
+      discoveryPromise = null;
+    }
+  })();
+
+  return discoveryPromise;
 }
 
 // ── OpenClaw filesystem paths ─────────────────────────────────────────────
@@ -1088,15 +1104,16 @@ function buildAgentTools() {
 
 // ── AgentEvent → Bridge event mapping ────────────────────────────────────
 
-function bridgeEvent(event) {
+// skillContext: if set, events are tagged as skill events and ignored by the main session view
+function bridgeEvent(event, skillContext = null) {
   switch (event.type) {
     case 'message_update': {
       const e = event.assistantMessageEvent;
       if (e.type === 'text_delta') {
-        channel.send('message', { type: 'agent.event', eventType: 'text_delta', data: { text: e.delta } });
+        channel.send('message', { type: 'agent.event', eventType: 'text_delta', data: { text: e.delta }, skill: skillContext });
       }
       if (e.type === 'thinking_delta') {
-        channel.send('message', { type: 'agent.event', eventType: 'thinking', data: { text: e.delta } });
+        channel.send('message', { type: 'agent.event', eventType: 'thinking', data: { text: e.delta }, skill: skillContext });
       }
       break;
     }
@@ -1105,6 +1122,7 @@ function bridgeEvent(event) {
         type: 'agent.event',
         eventType: 'tool_use',
         data: { toolName: event.toolName, toolCallId: event.toolCallId, args: event.args },
+        skill: skillContext,
       });
       break;
     case 'tool_execution_end':
@@ -1112,6 +1130,7 @@ function bridgeEvent(event) {
         type: 'agent.event',
         eventType: 'tool_result',
         data: { toolName: event.toolName, toolCallId: event.toolCallId, result: event.result },
+        skill: skillContext,
       });
       break;
   }
@@ -1516,7 +1535,7 @@ function buildSkillTools(injectedTools, milestones) {
   });
 }
 
-async function runSetupSkill(agentId, locale = 'en', injectedConfig = null) {
+async function runSkill(agentId, locale = 'en', injectedConfig = null) {
   await refreshOAuthTokenIfNeeded(agentId);
   const authProfiles = loadAuthProfiles(agentId);
   const apiKey = resolveApiKey(authProfiles);
@@ -1549,7 +1568,8 @@ async function runSetupSkill(agentId, locale = 'en', injectedConfig = null) {
   const filteredMcp = mcpTools.filter(t => !setupNames.has(t.name));
   const tools = [...setupTools, ...filteredBase, ...filteredMcp];
 
-  const sessionKey = `setup/${Date.now()}`;
+  const skillId = injectedConfig?.id || 'setup';
+  const sessionKey = `${skillId}/${Date.now()}`;
   const agent = new Agent({
     initialState: {
       systemPrompt,
@@ -1568,11 +1588,14 @@ async function runSetupSkill(agentId, locale = 'en', injectedConfig = null) {
   setupMilestonesReached.clear();
 
   agent.subscribe((event) => {
-    bridgeEvent(event);
+    bridgeEvent(event, sessionKey); // tag all events with skill sessionKey
     if (event.type === 'tool_execution_end' && sessionKey) {
       _checkpointMessages(agent, agentId, sessionKey);
     }
   });
+
+  // Notify client that the skill session has started (used to init isolated conversation view)
+  channel.send('message', { type: 'skill.session_started', sessionKey, skillId });
 
   const startTime = Date.now();
   try {
@@ -1585,17 +1608,21 @@ async function runSetupSkill(agentId, locale = 'en', injectedConfig = null) {
     channel.send('message', {
       type: 'agent.completed',
       sessionKey,
+      skill: sessionKey,
       usage,
       cumulativeUsage: usage,
       durationMs: Date.now() - startTime,
     });
+    channel.send('message', { type: 'skill.ended', skillId, sessionKey });
   } catch (err) {
     channel.send('message', {
       type: 'agent.error',
-      error: err.message || 'Setup skill error',
+      skill: sessionKey,
+      error: err.message || 'Skill error',
       code: err.status ? String(err.status) : undefined,
       retryable: isTransientError(err),
     });
+    channel.send('message', { type: 'skill.ended', skillId, sessionKey });
   }
 }
 
@@ -1897,18 +1924,19 @@ channel.addListener('message', async (event) => {
     case 'skill.start': {
       const agentId = msg.agentId || 'main';
       const locale = msg.locale || 'en';
-      await runSetupSkill(agentId, locale, msg.config || null);
+      await runSkill(agentId, locale, msg.config || null);
       break;
     }
 
     case 'oauth.exchange': {
       // Perform OAuth token exchange in Node.js (bypasses Capacitor HTTP / CORS)
-      const { tokenUrl, body } = msg;
+      const { tokenUrl, body, contentType } = msg;
+      const useForm = (contentType || 'application/x-www-form-urlencoded') === 'application/x-www-form-urlencoded';
       try {
         const resp = await fetch(tokenUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          headers: { 'Content-Type': useForm ? 'application/x-www-form-urlencoded' : 'application/json' },
+          body: useForm ? new URLSearchParams(body).toString() : JSON.stringify(body),
         });
         const text = await resp.text();
         let data;
@@ -1926,6 +1954,29 @@ channel.addListener('message', async (event) => {
           success: false,
           error: err.message,
         });
+      }
+      break;
+    }
+
+    case 'mcp.tools.invalidate': {
+      // MCP server restarted with new tools (e.g. after account connection).
+      // Increment epoch first so any in-flight discoverMcpTools() discards its result.
+      discoveryEpoch++;
+      cachedMcpTools = null;
+      discoveryPromise = null;
+      // If an agent is running, re-discover and inject the updated tool set
+      if (currentAgent) {
+        try {
+          const localTools = buildAgentTools();
+          const mcpTools = await discoverMcpTools();
+          const tools = [...localTools, ...mcpTools];
+          currentAgent.setTools(tools);
+          console.log(`[mobile-claw] Tools invalidated and refreshed: ${tools.length} total (${mcpTools.length} MCP)`);
+        } catch (err) {
+          console.warn(`[mobile-claw] Tool refresh failed: ${err.message}`);
+        }
+      } else {
+        console.log('[mobile-claw] MCP tool cache invalidated (no active agent)');
       }
       break;
     }
@@ -2297,7 +2348,7 @@ channel.addListener('message', async (event) => {
 
 ensureOpenClawDirs();
 
-// Initialize SQLite, migrate legacy JSONL data, then start MCP discovery
+// Initialize SQLite, migrate legacy JSONL data, then signal ready and warm MCP discovery
 initWorkerDb(OPENCLAW_ROOT).then(() => {
   // Migrate existing JSONL sessions into SQLite (one-time, idempotent)
   try {
@@ -2308,23 +2359,24 @@ initWorkerDb(OPENCLAW_ROOT).then(() => {
 }).catch(err => {
   console.warn(`[init] SQLite init failed, using JSONL fallback: ${err.message}`);
 }).finally(() => {
+  // Send ready as soon as DB init/migration settles — do not block on MCP discovery.
+  channel.send('message', {
+    type: 'worker.ready',
+    nodeVersion: process.version,
+    openclawRoot: OPENCLAW_ROOT,
+    mcpToolCount: 0,
+  });
+  console.log(`[mobile-claw worker] Ready. Node ${process.version}, root=${OPENCLAW_ROOT}, mcpTools=0 (discovering...)`);
+
   // Pre-discover MCP device tools at startup (non-blocking, best-effort).
   // Results are cached so the first agent run doesn't wait for discovery.
   discoverMcpTools().then(tools => {
-    channel.send('message', {
-      type: 'worker.ready',
-      nodeVersion: process.version,
-      openclawRoot: OPENCLAW_ROOT,
-      mcpToolCount: tools.length,
-    });
-    console.log(`[mobile-claw worker] Ready. Node ${process.version}, root=${OPENCLAW_ROOT}, mcpTools=${tools.length}`);
-  }).catch(() => {
-    channel.send('message', {
-      type: 'worker.ready',
-      nodeVersion: process.version,
-      openclawRoot: OPENCLAW_ROOT,
-      mcpToolCount: 0,
-    });
-    console.log(`[mobile-claw worker] Ready (no MCP). Node ${process.version}, root=${OPENCLAW_ROOT}`);
-  });
+    if (tools.length > 0) {
+      channel.send('message', {
+        type: 'worker.tools_updated',
+        mcpToolCount: tools.length,
+      });
+      console.log(`[mobile-claw worker] MCP tools ready: ${tools.length}`);
+    }
+  }).catch(() => {});
 });
