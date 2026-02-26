@@ -39,6 +39,7 @@ export class MobileClawEngine {
   private _loading = false
   private _error: string | null = null
   private _currentSessionKey: string | null = null
+  private _loadingPhase: string = 'starting'
 
   private nodePlugin: any = null
   private listeners = new Map<string, Set<MessageHandler>>()
@@ -70,6 +71,9 @@ export class MobileClawEngine {
   }
   get currentSessionKey(): string | null {
     return this._currentSessionKey
+  }
+  get loadingPhase(): string {
+    return this._loadingPhase
   }
 
   /** Access the MCP server manager for status, restart, etc. */
@@ -112,6 +116,10 @@ export class MobileClawEngine {
         if (msg?.mcpToolCount == null) return
         this._mcpToolCount = msg.mcpToolCount
         console.log(`[MobileClaw] Tools updated — ${this._mcpToolCount} MCP tools`)
+      })
+
+      this._onMessage('worker.loading_phase', (msg) => {
+        if (msg?.phase) this._loadingPhase = msg.phase
       })
 
       // Set up worker.ready promise before MCP init (captures early ready events)

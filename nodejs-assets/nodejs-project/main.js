@@ -2347,9 +2347,11 @@ channel.addListener('message', async (event) => {
 // ── Init ──────────────────────────────────────────────────────────────────
 
 ensureOpenClawDirs();
+channel.send('message', { type: 'worker.loading_phase', phase: 'engine' });
 
 // Initialize SQLite, migrate legacy JSONL data, then signal ready and warm MCP discovery
 initWorkerDb(OPENCLAW_ROOT).then(() => {
+  channel.send('message', { type: 'worker.loading_phase', phase: 'database' });
   // Migrate existing JSONL sessions into SQLite (one-time, idempotent)
   try {
     migrateFromJsonl(OPENCLAW_ROOT, 'main', deduplicateMessages);
@@ -2370,6 +2372,7 @@ initWorkerDb(OPENCLAW_ROOT).then(() => {
 
   // Pre-discover MCP device tools at startup (non-blocking, best-effort).
   // Results are cached so the first agent run doesn't wait for discovery.
+  channel.send('message', { type: 'worker.loading_phase', phase: 'tools' });
   discoverMcpTools().then(tools => {
     if (tools.length > 0) {
       channel.send('message', {
@@ -2378,5 +2381,8 @@ initWorkerDb(OPENCLAW_ROOT).then(() => {
       });
       console.log(`[mobile-claw worker] MCP tools ready: ${tools.length}`);
     }
-  }).catch(() => {});
+    channel.send('message', { type: 'worker.loading_phase', phase: 'ready' });
+  }).catch(() => {
+    channel.send('message', { type: 'worker.loading_phase', phase: 'ready' });
+  });
 });
