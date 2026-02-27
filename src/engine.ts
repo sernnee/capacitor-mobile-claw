@@ -317,7 +317,7 @@ export class MobileClawEngine {
 
   // ── Agent control ──────────────────────────────────────────────────────
 
-  async sendMessage(prompt: string, agentId = 'main', options?: { model?: string }): Promise<{ sessionKey: string }> {
+  async sendMessage(prompt: string, agentId = 'main', options?: { model?: string; provider?: string }): Promise<{ sessionKey: string }> {
     if (!this._currentSessionKey) {
       this._currentSessionKey = `session-${Date.now()}`
     }
@@ -331,15 +331,16 @@ export class MobileClawEngine {
       sessionKey: this._currentSessionKey,
       prompt,
       ...(options?.model && { model: options.model }),
+      ...(options?.provider && { provider: options.provider }),
       idempotencyKey,
     })
     return { sessionKey: this._currentSessionKey }
   }
 
-  async getModels(): Promise<Array<{ id: string; name: string; description: string; default?: boolean }>> {
+  async getModels(provider = 'anthropic'): Promise<Array<{ id: string; name: string; description: string; default?: boolean }>> {
     return new Promise((resolve) => {
       this._onMessage('config.models.result', (msg) => resolve(msg.models || []), { once: true })
-      this.send({ type: 'config.models' })
+      this.send({ type: 'config.models', provider })
     })
   }
 
@@ -383,10 +384,10 @@ export class MobileClawEngine {
     })
   }
 
-  async getAuthStatus(): Promise<AuthStatus> {
+  async getAuthStatus(provider = 'anthropic'): Promise<AuthStatus> {
     return new Promise((resolve) => {
       this._onMessage('config.status.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'config.status' })
+      this.send({ type: 'config.status', provider })
     })
   }
 

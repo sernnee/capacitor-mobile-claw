@@ -109,7 +109,7 @@ function onMessage(type, handler, opts = {}) {
   return engine.onMessage(type, handler, opts)
 }
 
-async function sendMessage(prompt, agentId = 'main') {
+async function sendMessage(prompt, agentId = 'main', options = {}) {
   lastUserPrompt = prompt
 
   // ── Auto-recall: inject relevant memories ──
@@ -119,7 +119,7 @@ async function sendMessage(prompt, agentId = 'main') {
     if (context) enrichedPrompt = context + '\n\n' + prompt
   } catch { /* non-fatal — send without context */ }
 
-  const result = await engine.sendMessage(enrichedPrompt, agentId)
+  const result = await engine.sendMessage(enrichedPrompt, agentId, options)
   return result.sessionKey
 }
 
@@ -147,8 +147,12 @@ async function writeFile(path, content) {
   return engine.writeFile(path, content)
 }
 
-async function getAuthStatus() {
-  return engine.getAuthStatus()
+async function getAuthStatus(provider = 'anthropic') {
+  return engine.getAuthStatus(provider)
+}
+
+async function getModels(provider = 'anthropic') {
+  return engine.getModels(provider)
 }
 
 async function listSessions(agentId = 'main') {
@@ -210,6 +214,7 @@ export function useMobileClaw() {
 
     // Settings & session management
     getAuthStatus,
+    getModels,
     listSessions,
     clearConversation,
     getLatestSession,

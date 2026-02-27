@@ -298,20 +298,25 @@ function saveAuthProfiles(agentId, profiles) {
 }
 
 function resolveApiKey(authProfiles) {
-  // Prefer lastGood profile if set
-  const lastGoodKey = authProfiles.lastGood?.anthropic;
+  return resolveApiKeyForProvider(authProfiles, 'anthropic');
+}
+
+function resolveApiKeyForProvider(authProfiles, provider) {
+  // Prefer lastGood profile for this provider
+  const lastGoodKey = authProfiles.lastGood?.[provider];
   if (lastGoodKey && authProfiles.profiles[lastGoodKey]) {
     const p = authProfiles.profiles[lastGoodKey];
-    if (p.type === 'oauth' && p.access) return p.access;
-    if (p.type === 'api_key' && p.key) return p.key;
+    if (p.provider === provider) {
+      if (p.type === 'oauth' && p.access) return p.access;
+      if (p.type === 'api_key' && p.key) return p.key;
+    }
   }
-  // Fallback: prefer OAuth over api_key
+  // Fallback: scan profiles for this provider (prefer oauth over api_key for anthropic)
   let fallbackApiKey = null;
   for (const [, profile] of Object.entries(authProfiles.profiles)) {
-    if (profile.provider === 'anthropic' && profile.type === 'oauth' && profile.access) {
-      return profile.access;
-    }
-    if (profile.provider === 'anthropic' && profile.type === 'api_key' && profile.key && !fallbackApiKey) {
+    if (profile.provider !== provider) continue;
+    if (profile.type === 'oauth' && profile.access) return profile.access;
+    if (profile.type === 'api_key' && profile.key && !fallbackApiKey) {
       fallbackApiKey = profile.key;
     }
   }
@@ -1759,8 +1764,9 @@ function _legacySetupTools() {
 
 // ── Main agent run function ──────────────────────────────────────────────
 
-async function runAgentLoop(agentId, sessionKey, prompt, requestedModel) {
-  console.error(`[DEBUG] runAgentLoop START: agentId=${agentId} sessionKey=${sessionKey} model=${requestedModel}`);
+async function runAgentLoop(agentId, sessionKey, prompt, requestedModel, requestedProvider) {
+  const provider = requestedProvider || 'anthropic';
+  console.error(`[DEBUG] runAgentLoop START: agentId=${agentId} sessionKey=${sessionKey} provider=${provider} model=${requestedModel}`);
   try {
     await refreshOAuthTokenIfNeeded(agentId);
   } catch (oauthErr) {
@@ -1770,23 +1776,32 @@ async function runAgentLoop(agentId, sessionKey, prompt, requestedModel) {
   const profileKeys = Object.keys(authProfiles.profiles || {});
   const profileTypes = profileKeys.map(k => `${k}:${authProfiles.profiles[k]?.type}`);
   console.error(`[DEBUG] Auth profiles: ${profileKeys.length} profiles [${profileTypes.join(', ')}] lastGood=${JSON.stringify(authProfiles.lastGood)}`);
-  const apiKey = resolveApiKey(authProfiles);
+  const apiKey = resolveApiKeyForProvider(authProfiles, provider);
 
   if (!apiKey) {
-    console.error(`[DEBUG] NO API KEY — sending agent.error`);
+    console.error(`[DEBUG] NO API KEY for provider=${provider} — sending agent.error`);
     channel.send('message', {
       type: 'agent.error',
-      error: 'No Anthropic API key configured. Go to Settings to add one.',
+      error: `No API key configured for provider "${provider}". Go to Settings to add one.`,
     });
     return;
   }
-  console.error(`[DEBUG] API key resolved: type=${apiKey.startsWith('sk-ant-oat') ? 'oauth' : apiKey.startsWith('sk-ant-') ? 'api_key' : 'unknown'} len=${apiKey.length} prefix=${apiKey.slice(0,12)}...`);
+  console.error(`[DEBUG] API key resolved for provider=${provider}: len=${apiKey.length} prefix=${apiKey.slice(0,12)}...`);
 
   const systemPrompt = loadSystemPrompt();
   console.error(`[DEBUG] System prompt loaded: ${systemPrompt.length} chars`);
-  const modelId = requestedModel || 'claude-sonnet-4-5';
-  console.error(`[DEBUG] Getting model: provider=anthropic modelId=${modelId}`);
-  const model = getModel('anthropic', modelId);
+  const defaultModel = provider === 'anthropic' ? 'claude-sonnet-4-5' : null;
+  const modelId = requestedModel || defaultModel;
+  if (!modelId) {
+    channel.send('message', { type: 'agent.error', error: `No model specified for provider "${provider}". Select a model in Settings.` });
+    return;
+  }
+  console.error(`[DEBUG] Getting model: provider=${provider} modelId=${modelId}`);
+  const model = getModel(provider, modelId);
+  if (!model) {
+    channel.send('message', { type: 'agent.error', error: `Model "${modelId}" not found for provider "${provider}".` });
+    return;
+  }
   console.error(`[DEBUG] Model resolved: ${JSON.stringify({id: model?.id, provider: model?.provider, api: model?.api}).slice(0,200)}`);
 
   // Merge local tools with MCP device tools (if bridge is available)
@@ -1952,7 +1967,7 @@ channel.addListener('message', async (event) => {
       } else {
         // New conversation
         currentAbortController = new AbortController();
-        await runAgentLoop(msg.agentId, msg.sessionKey, msg.prompt, msg.model);
+        await runAgentLoop(msg.agentId, msg.sessionKey, msg.prompt, msg.model, msg.provider);
       }
       break;
     }
@@ -2154,11 +2169,12 @@ channel.addListener('message', async (event) => {
     }
 
     case 'config.status': {
+      const statusProvider = msg.provider || 'anthropic';
       const profiles = loadAuthProfiles('main');
       let hasKey = false;
       let masked = '';
       for (const [, profile] of Object.entries(profiles.profiles)) {
-        if (profile.provider === 'anthropic') {
+        if (profile.provider === statusProvider) {
           const key = profile.key || profile.access || '';
           if (key) {
             hasKey = true;
@@ -2169,16 +2185,37 @@ channel.addListener('message', async (event) => {
           }
         }
       }
-      channel.send('message', { type: 'config.status.result', hasKey, masked });
+      channel.send('message', { type: 'config.status.result', hasKey, masked, provider: statusProvider });
       break;
     }
 
     case 'config.models': {
-      const models = [
-        { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Fast and capable', default: true },
-        { id: 'claude-haiku-3-5', name: 'Claude Haiku 3.5', description: 'Quick and lightweight' },
-        { id: 'claude-opus-4', name: 'Claude Opus 4', description: 'Most capable' },
-      ];
+      const CURATED_MODELS = {
+        anthropic: [
+          { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Fast and capable', default: true },
+          { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Quick and lightweight' },
+          { id: 'claude-opus-4', name: 'Claude Opus 4', description: 'Most capable' },
+        ],
+        openrouter: [
+          { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', description: 'Fast and capable', default: true },
+          { id: 'openai/gpt-4o', name: 'GPT-4o', description: "OpenAI's flagship" },
+          { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', description: 'Fast and affordable' },
+          { id: 'openai/o4-mini', name: 'o4 Mini', description: 'Reasoning model' },
+          { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Google — fast' },
+          { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Google — powerful' },
+          { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', description: 'Efficient and capable' },
+          { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', description: 'Open-source' },
+          { id: 'x-ai/grok-4', name: 'Grok 4', description: 'xAI model' },
+          { id: 'qwen/qwen3-235b-a22b', name: 'Qwen3 235B', description: 'Large MoE model' },
+        ],
+        openai: [
+          { id: 'gpt-4o', name: 'GPT-4o', description: "OpenAI's flagship", default: true },
+          { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'Fast and affordable' },
+          { id: 'o4-mini', name: 'o4 Mini', description: 'Reasoning model' },
+        ],
+      };
+      const reqProvider = msg.provider || 'anthropic';
+      const models = CURATED_MODELS[reqProvider] || CURATED_MODELS.anthropic;
       channel.send('message', { type: 'config.models.result', models });
       break;
     }
