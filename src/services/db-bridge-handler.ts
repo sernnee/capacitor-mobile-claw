@@ -230,6 +230,7 @@ export class DbBridgeHandler {
       }
       this._respond(id, result)
     } catch (err: any) {
+      console.error(`[db-bridge] RPC error: method=${method} id=${id} err=${err?.message}`)
       this._respondError(id, err)
     }
   }
@@ -311,7 +312,7 @@ export class DbBridgeHandler {
     await this.db.open()
     await this._runMigrations()
 
-    console.log('[db-bridge] Native SQLite initialized', this.isWeb ? '(web/WASM)' : `(${Capacitor.getPlatform()})`)
+    // DB ready
   }
 
   private async _runMigrations(): Promise<void> {

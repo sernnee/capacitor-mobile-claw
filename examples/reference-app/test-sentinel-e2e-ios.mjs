@@ -16,6 +16,7 @@
  */
 
 import { execSync } from 'child_process'
+import { readFileSync } from 'fs'
 import http from 'http'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -25,8 +26,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // ─── Config ──────────────────────────────────────────────────────────────────
 const BUNDLE_ID = 'io.mobileclaw.reference'
 const RUNNER_PORT = 8099
-const TOTAL_TESTS = 57
+const TOTAL_TESTS = 100 // 57 sentinel + 1 credential injection + ~42 memory/lancedb
 const TIMEOUT_MS = 300_000 // 5 minutes (heartbeat wakes need Claude API calls)
+
+// Load OAuth credentials from env or JSON file
+// Set ANTHROPIC_OAUTH_FILE to a JSON file with { access, refresh, expiresAt } fields
+// Or set ANTHROPIC_ACCESS_TOKEN directly
+function loadCredentials() {
+  if (process.env.ANTHROPIC_ACCESS_TOKEN) {
+    return {
+      accessToken: process.env.ANTHROPIC_ACCESS_TOKEN,
+      refreshToken: process.env.ANTHROPIC_REFRESH_TOKEN || '',
+      expiresAt: parseInt(process.env.ANTHROPIC_EXPIRES_AT || '0') || Date.now() + 3600000,
+    }
+  }
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { apiKey: process.env.ANTHROPIC_API_KEY }
+  }
+  const credsFile = process.env.ANTHROPIC_OAUTH_FILE || path.join(__dirname, '.sentinel-creds.json')
+  try {
+    const data = JSON.parse(readFileSync(credsFile, 'utf8'))
+    if (data.access) return { accessToken: data.access, refreshToken: data.refresh || '', expiresAt: data.expiresAt || Date.now() + 3600000 }
+    if (data.accessToken) return data
+    if (data.apiKey) return data
+  } catch {}
+  return null
+}
+const sentinelCreds = loadCredentials()
 
 // ─── Test runner state ───────────────────────────────────────────────────────
 let passedTests = 0
@@ -123,6 +149,13 @@ function startServer() {
       if (req.method === 'GET' && url.pathname === '/__sentinel_ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
+        return
+      }
+
+      // Serve OAuth/API credentials for heartbeat tests
+      if (req.method === 'GET' && url.pathname === '/__sentinel_creds') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(sentinelCreds || {}))
         return
       }
 

@@ -369,6 +369,7 @@ let _pendingVerifier = null
 
 const openrouterLoading = ref(false)
 let _appUrlListener = null
+let _anthropicOAuthActive = false
 
 // ── OAuth PKCE constants (Anthropic) ──────────────────────────────────────
 
@@ -457,14 +458,45 @@ async function startOAuthPkce() {
     })
 
     const authUrl = `${OAUTH_AUTHORIZE_URL}?${params.toString()}`
-    if (typeof window !== 'undefined' && window.open) {
-      window.open(authUrl, '_system')
-    }
 
-    waitingForCode.value = true
+    if (isNative) {
+      // Use Capacitor Browser plugin (in-app browser) — works on both iOS and Android.
+      // Anthropic's redirect goes to console.anthropic.com (not back to the app),
+      // so the deep link won't fire. Their callback page shows the auth code for the
+      // user to copy. We show a paste-code UI when the browser closes.
+      const { Browser } = await import('@capacitor/browser')
+
+      let closedHandle = null
+      const cleanup = async () => {
+        const c = closedHandle; closedHandle = null
+        if (c) { try { const h = await c; h.remove() } catch {} }
+      }
+
+      Browser.open({ url: authUrl, presentationStyle: 'popover' }).then(() => {
+        // Listen for deep link callback (future-proof, in case Anthropic adds redirect support)
+        const existingHandler = _appUrlListener
+        const originalHandleAppUrl = handleAppUrl
+        // Temporarily augment the global handler to catch Anthropic OAuth codes
+        _anthropicOAuthActive = true
+
+        // When user closes browser → show code-paste UI
+        closedHandle = Browser.addListener('browserFinished', () => {
+          cleanup()
+          _anthropicOAuthActive = false
+          waitingForCode.value = true
+          oauthLoading.value = false
+        })
+      })
+    } else {
+      // Web fallback: open in new tab
+      if (typeof window !== 'undefined' && window.open) {
+        window.open(authUrl, '_system')
+      }
+      waitingForCode.value = true
+      oauthLoading.value = false
+    }
   } catch (e) {
     oauthError.value = `OAuth error: ${e.message}`
-  } finally {
     oauthLoading.value = false
   }
 }
@@ -522,11 +554,29 @@ function cancelOAuth() {
 
 // ── OpenRouter OAuth flow ─────────────────────────────────────────────────
 
-function startOpenRouterOAuth() {
+async function startOpenRouterOAuth() {
   openrouterLoading.value = true
   const authUrl = `${OPENROUTER_AUTH_URL}?callback_url=${encodeURIComponent(OPENROUTER_CALLBACK)}`
-  if (typeof window !== 'undefined' && window.open) {
-    window.open(authUrl, '_system')
+
+  if (isNative) {
+    const { Browser } = await import('@capacitor/browser')
+
+    let closedHandle = null
+    const cleanup = async () => {
+      const c = closedHandle; closedHandle = null
+      if (c) { try { const h = await c; h.remove() } catch {} }
+    }
+
+    Browser.open({ url: authUrl, presentationStyle: 'popover' }).then(() => {
+      closedHandle = Browser.addListener('browserFinished', () => {
+        cleanup()
+        openrouterLoading.value = false
+      })
+    })
+  } else {
+    if (typeof window !== 'undefined' && window.open) {
+      window.open(authUrl, '_system')
+    }
   }
 }
 
@@ -535,9 +585,31 @@ function startOpenRouterOAuth() {
 async function handleAppUrl(event) {
   const url = event.url || ''
 
+  // Anthropic OAuth deep link (future-proof — Anthropic may add redirect support)
+  if (url.includes('oauth/code/callback') && _anthropicOAuthActive && _pendingVerifier) {
+    _anthropicOAuthActive = false
+    try {
+      const { Browser } = await import('@capacitor/browser')
+      Browser.close().catch(() => {})
+    } catch {}
+    try {
+      const parsed = new URL(url)
+      const code = parsed.searchParams.get('code') || ''
+      if (code) {
+        oauthCodeInput.value = code
+        await submitOAuthCode()
+      }
+    } catch { /* non-fatal */ }
+    return
+  }
+
   // OpenRouter returns the API key as ?code=<key> in the callback URL
   if (url.includes('openrouter/callback')) {
     openrouterLoading.value = false
+    try {
+      const { Browser } = await import('@capacitor/browser')
+      Browser.close().catch(() => {})
+    } catch {}
     try {
       const parsed = new URL(url)
       const key = parsed.searchParams.get('code')

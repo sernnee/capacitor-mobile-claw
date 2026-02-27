@@ -6,16 +6,20 @@
   "scripts": {
     "setup:worker": "rm -rf public/nodejs-project && mkdir -p public && cp -R ../../nodejs-assets/nodejs-project public/nodejs-project && rm -rf public/nodejs-project/node_modules && cd public/nodejs-project && npm install --production",
     "preinstall": "node -e \"const{execSync}=require('child_process'),{existsSync}=require('fs');if(!existsSync('../../dist')){console.log('Building capacitor-mobile-claw...');execSync('npm install --ignore-scripts',{cwd:'../../',stdio:'inherit'});execSync('./node_modules/.bin/tsc',{cwd:'../../',stdio:'inherit'})}\"",
-    "postinstall": "npm run setup:worker",
+    "postinstall": "node scripts/patch-sqlite-ios.mjs; npm run setup:worker",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "cap:sync": "cap sync && cp -R node_modules/@choreruiz/capacitor-node-js/ios/assets/builtin_modules ios/App/App/public/builtin_modules 2>/dev/null; true",
-    "cap:build": "npm run setup:worker && vite build && npm run cap:sync"
+    "cap:build": "npm run setup:worker && vite build && npm run cap:sync",
+    "test:full": "node scripts/test-full.mjs",
+    "test:android": "node test-sentinel-e2e.mjs",
+    "test:ios": "node test-sentinel-e2e-ios.mjs"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "^8.0.0",
     "@capacitor/app": "^8.0.1",
+    "@capacitor/browser": "^8.0.0",
     "@capacitor/clipboard": "^8.0.1",
     "@capacitor/core": "^8.1.0",
     "@capacitor/keyboard": "^8.0.0",

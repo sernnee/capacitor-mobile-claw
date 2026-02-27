@@ -55,10 +55,13 @@ async function _doInit() {
     // ── Dev helper: expose engine on window for CDP testing ──
     // Set early so tests can access the engine before init completes
     window.__mobileClaw = engine
+    window.__mobileClaw._memory = memory
+    window.__mobileClaw._memoryReady = false
 
     // ── Initialize memory system ──
     const savedConfig = loadSavedConfig()
     await initMemory(savedConfig)
+    window.__mobileClaw._memoryReady = true
 
     // Pass memory tools and pre-imported MobileCron to engine init
     const memoryTools = memory.getTools()
