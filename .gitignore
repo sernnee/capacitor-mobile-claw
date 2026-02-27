@@ -9,6 +9,8 @@ dist/
 
 # Generated worker copy (setup:worker copies nodejs-assets → public/)
 **/public/nodejs-project/
+# Reference-app lockfile is platform-specific (optional native deps differ by OS)
+examples/reference-app/package-lock.json
 
 # Test workspaces
 .test-openclaw*/
