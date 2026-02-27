@@ -1,6 +1,6 @@
 {
   "name": "capacitor-mobile-claw",
-  "version": "1.4.1",
+  "version": "1.4.3",
   "description": "On-device AI agent engine for Capacitor apps — embedded Node.js worker with LLM, file tools, code execution, git, and extensible MCP server",
   "main": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
@@ -27,10 +27,14 @@
     "@capacitor/core": "^8.0.0",
     "@capacitor/device": "^8.0.0",
     "@modelcontextprotocol/sdk": ">=1.0.0",
-    "@choreruiz/capacitor-node-js": ">=1.0.0"
+    "@choreruiz/capacitor-node-js": ">=1.0.0",
+    "capacitor-mobilecron": ">=1.0.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "capacitor-mobilecron": {
       "optional": true
     }
   },

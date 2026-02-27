@@ -9,5 +9,7 @@ export default defineConfig({
     alias: {
       '@': resolve(__dirname, 'src'),
     },
+    // Ensure file: deps (mobile-claw) resolve peer deps from this app's node_modules
+    dedupe: ['@capacitor/core', 'capacitor-mobilecron'],
   },
 })
