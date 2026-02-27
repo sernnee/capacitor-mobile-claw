@@ -8,8 +8,11 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
+      // Force Vite to resolve capacitor-mobilecron from this app's node_modules
+      // instead of treating it as an optional peer dep stub
+      'capacitor-mobilecron': resolve(__dirname, 'node_modules/capacitor-mobilecron'),
     },
     // Ensure file: deps (mobile-claw) resolve peer deps from this app's node_modules
-    dedupe: ['@capacitor/core'],
+    dedupe: ['@capacitor/core', 'capacitor-mobilecron'],
   },
 })

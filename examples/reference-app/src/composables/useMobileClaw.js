@@ -10,6 +10,7 @@
 
 import { ref } from 'vue'
 import { MobileClawEngine } from 'capacitor-mobile-claw'
+import { MobileCron } from 'capacitor-mobilecron'
 import { isNative } from '@/lib/platform.js'
 import { useMemory } from './useMemory.js'
 
@@ -46,7 +47,29 @@ async function _doInit() {
   error.value = null
 
   try {
-    // Listen for worker.ready to keep reactive refs in sync
+    // ── Unrestricted mode: auto-approve all tool calls via pre-execute hook ──
+    engine.onMessage('tool.pre_execute', (msg) => {
+      engine.respondToPreExecute(msg.toolCallId, msg.args)
+    })
+
+    // ── Dev helper: expose engine on window for CDP testing ──
+    // Set early so tests can access the engine before init completes
+    window.__mobileClaw = engine
+
+    // ── Initialize memory system ──
+    const savedConfig = loadSavedConfig()
+    await initMemory(savedConfig)
+
+    // Pass memory tools and pre-imported MobileCron to engine init
+    const memoryTools = memory.getTools()
+    await engine.init({ tools: memoryTools, mobileCron: MobileCron })
+
+    // Set readFile for memory_get tool
+    memory.setReadFile((path) => engine.readFile(path))
+
+    // Listen for worker.ready AFTER engine.init to keep reactive refs in sync
+    // (registered after init to avoid consuming the event before the engine's
+    // internal readyPromise handler)
     engine.onMessage('worker.ready', () => {
       available.value = engine.available
       workerReady.value = engine.ready
@@ -56,22 +79,6 @@ async function _doInit() {
       error.value = engine.error
     })
 
-    // ── Unrestricted mode: auto-approve all tool calls via pre-execute hook ──
-    engine.onMessage('tool.pre_execute', (msg) => {
-      engine.respondToPreExecute(msg.toolCallId, msg.args)
-    })
-
-    // ── Initialize memory system ──
-    const savedConfig = loadSavedConfig()
-    await initMemory(savedConfig)
-
-    // Pass memory tools to engine init so the agent can use them
-    const memoryTools = memory.getTools()
-    await engine.init({ tools: memoryTools })
-
-    // Set readFile for memory_get tool
-    memory.setReadFile((path) => engine.readFile(path))
-
     // Sync state after init resolves
     available.value = engine.available
     workerReady.value = engine.ready
@@ -79,9 +86,6 @@ async function _doInit() {
     openclawRoot.value = engine.openclawRoot
     loading.value = engine.loading
     error.value = engine.error
-
-    // ── Dev helper: expose engine on window for CDP testing ──
-    window.__mobileClaw = engine
 
     // ── Index workspace memory files (non-blocking) ──
     reindex(

@@ -190,6 +190,8 @@ export interface MobileClawInitOptions {
   tools?: DeviceTool[]
   /** Worker startup timeout in ms. Default: 60000. */
   workerTimeout?: number
+  /** Pre-imported MobileCron plugin instance. Avoids dynamic import issues in Capacitor WebView. */
+  mobileCron?: any
 }
 
 export interface StompConfig {

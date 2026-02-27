@@ -2636,6 +2636,24 @@ channel.addListener('message', async (event) => {
       break;
     }
 
+    case 'webview_trace': {
+      console.error(`[WEBVIEW] ${msg.label}`);
+      break;
+    }
+
+    case 'status_ping': {
+      // iOS race condition: the WebView registered its listener after worker.ready
+      // was already sent.  Re-emit so the engine can pick it up.
+      console.error(`[DEBUG] status_ping received — re-emitting worker.ready`);
+      channel.send('message', {
+        type: 'worker.ready',
+        nodeVersion: process.version,
+        openclawRoot: OPENCLAW_ROOT,
+        mcpToolCount: 0,
+      });
+      break;
+    }
+
     default:
       console.error(`[DEBUG] Unknown message type: ${msg.type}`);
   }

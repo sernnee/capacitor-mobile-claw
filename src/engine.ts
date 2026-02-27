@@ -112,11 +112,17 @@ export class MobileClawEngine {
       this.nodePlugin = NodeJS
       this._available = true
 
+      // Debug: send trace messages to worker so they appear in native logs
+      const _trace = (label: string) => {
+        this.nodePlugin?.send({ eventName: 'message', args: [{ type: 'webview_trace', label }] }).catch(() => {})
+      }
+
       // Register message listener FIRST — the worker may have already
       // emitted worker.ready before MCP init completes.
       this.nodePlugin.addListener('message', (event: any) => {
         const msg = event?.args?.[0] ?? event
         if (!msg || !msg.type) return
+        if (msg.type === 'worker.ready') _trace('GOT worker.ready via dispatch')
         this._dispatch(msg)
       })
 
@@ -143,6 +149,7 @@ export class MobileClawEngine {
           'worker.ready',
           (msg) => {
             clearTimeout(timer)
+            _trace(`worker.ready HANDLER fired — nodeVersion=${msg.nodeVersion}`)
             this._ready = true
             this._nodeVersion = msg.nodeVersion
             this._openclawRoot = msg.openclawRoot
@@ -175,9 +182,25 @@ export class MobileClawEngine {
         console.warn('[MobileClaw] MCP bridge start failed (non-fatal):', mcpErr)
       }
 
-      const readyInfo = await readyPromise
+      // iOS race condition workaround: on iOS the Node engine starts during
+      // plugin load() (before JS has registered listeners), so the worker.ready
+      // message may have already fired and been lost.  Use the native whenReady()
+      // method to detect this, then ask the worker to re-emit its status.
+      this.nodePlugin
+        .whenReady()
+        .then(() => {
+          if (!this._ready) {
+            console.log('[MobileClaw] Engine ready on native side but worker.ready missed — requesting re-emit')
+            this.nodePlugin.send({ eventName: 'message', args: [{ type: 'status_ping' }] }).catch(() => {})
+          }
+        })
+        .catch(() => {})
 
-      await this._initMobileCron().catch((err) => {
+      _trace('awaiting readyPromise...')
+      const readyInfo = await readyPromise
+      _trace(`readyPromise resolved — ready=${this._ready} nodeVersion=${readyInfo.nodeVersion}`)
+
+      await this._initMobileCron(options.mobileCron).catch((err) => {
         console.warn('[MobileClaw] MobileCron init failed (non-fatal):', err)
       })
 
@@ -190,15 +213,19 @@ export class MobileClawEngine {
     }
   }
 
-  private async _initMobileCron(): Promise<void> {
+  private async _initMobileCron(preloaded?: any): Promise<void> {
     let MobileCron: any
-    try {
-      const mod = await import('capacitor-mobilecron')
-      MobileCron = mod.MobileCron
-      this._mobileCron = MobileCron
-    } catch {
-      return
+    if (preloaded) {
+      MobileCron = preloaded
+    } else {
+      try {
+        const mod = await import('capacitor-mobilecron')
+        MobileCron = mod.MobileCron
+      } catch {
+        return
+      }
     }
+    this._mobileCron = MobileCron
 
     const schedulerConfig = await this.getSchedulerConfig()
     if (schedulerConfig.scheduler.enabled) {
@@ -317,7 +344,11 @@ export class MobileClawEngine {
 
   // ── Agent control ──────────────────────────────────────────────────────
 
-  async sendMessage(prompt: string, agentId = 'main', options?: { model?: string; provider?: string }): Promise<{ sessionKey: string }> {
+  async sendMessage(
+    prompt: string,
+    agentId = 'main',
+    options?: { model?: string; provider?: string },
+  ): Promise<{ sessionKey: string }> {
     if (!this._currentSessionKey) {
       this._currentSessionKey = `session-${Date.now()}`
     }
@@ -337,7 +368,9 @@ export class MobileClawEngine {
     return { sessionKey: this._currentSessionKey }
   }
 
-  async getModels(provider = 'anthropic'): Promise<Array<{ id: string; name: string; description: string; default?: boolean }>> {
+  async getModels(
+    provider = 'anthropic',
+  ): Promise<Array<{ id: string; name: string; description: string; default?: boolean }>> {
     return new Promise((resolve) => {
       this._onMessage('config.models.result', (msg) => resolve(msg.models || []), { once: true })
       this.send({ type: 'config.models', provider })
