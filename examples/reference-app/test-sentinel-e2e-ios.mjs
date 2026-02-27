@@ -214,7 +214,7 @@ async function main() {
     execSync('touch /tmp/.sentinel-build-marker', { shell: true })
     console.log('  → Building with xcodebuild...')
     execSync(
-      `xcodebuild -workspace App.xcworkspace -scheme App -sdk iphonesimulator ` +
+      `xcodebuild -project App.xcodeproj -scheme App -sdk iphonesimulator ` +
         `-destination "platform=iOS Simulator,id=${udid}" -configuration Debug build ` +
         `CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO`,
       {

@@ -198,6 +198,29 @@ export type UIToNodeMessage =
   | CronSkillUpdateMessage
   | CronSkillRemoveMessage
   | CronSkillListMessage
+  | DbJsonRpcResponseMessage
+
+// ── DB Bridge (bidirectional JSON-RPC) ─────────────────────────────────────
+
+export interface DbJsonRpcRequestMessage {
+  type: 'db.jsonrpc'
+  payload: {
+    jsonrpc: '2.0'
+    id: number
+    method: 'db.init' | 'db.isReady' | 'db.run' | 'db.query' | 'db.queryOne' | 'db.transaction' | 'db.flush'
+    params: Record<string, unknown>
+  }
+}
+
+export interface DbJsonRpcResponseMessage {
+  type: 'db.jsonrpc.response'
+  payload: {
+    jsonrpc: '2.0'
+    id: number
+    result?: unknown
+    error?: { code: number; message: string }
+  }
+}
 
 // ── Node.js → UI ────────────────────────────────────────────────────────────
 
@@ -460,3 +483,4 @@ export type NodeToUIMessage =
   | CronSkillUpdateResultMessage
   | CronSkillRemoveResultMessage
   | CronSkillListResultMessage
+  | DbJsonRpcRequestMessage

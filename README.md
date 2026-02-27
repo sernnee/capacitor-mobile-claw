@@ -104,7 +104,7 @@ Once the app launches, enter your Anthropic API key in settings and start chatti
 ## Install in Your Own App
 
 ```bash
-npm install capacitor-mobile-claw @capacitor/core @capacitor/device @choreruiz/capacitor-node-js
+npm install capacitor-mobile-claw @capacitor/core @capacitor/device @choreruiz/capacitor-node-js @capacitor-community/sqlite
 ```
 
 Then add these scripts to your `package.json`:
@@ -179,7 +179,7 @@ await engine.init({
 ## Features
 
 - **Real-time streaming** — text deltas, tool use, and thinking events
-- **Multi-turn conversations** — session persistence with JSONL transcripts
+- **Multi-turn conversations** — session persistence via native SQLite
 - **OAuth PKCE + API key** — sign in with Claude Max or use a direct API key
 - **File tools** — sandboxed read/write/edit/find/grep
 - **Code execution** — JavaScript (sandbox) + Python (Pyodide/WebAssembly)
@@ -241,6 +241,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guid
 | Tool protocol | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) |
 | LLM provider | [Anthropic Claude](https://anthropic.com/) |
 | Git | [isomorphic-git](https://isomorphic-git.org/) |
+| Database | [@capacitor-community/sqlite](https://github.com/nicepkg/capacitor-community-sqlite) (native SQLite via JSON-RPC bridge) |
 | Python | [Pyodide](https://pyodide.org/) (CPython via WebAssembly) |
 | Type system | TypeScript (strict mode) |
 | Tests | [Vitest](https://vitest.dev/) |

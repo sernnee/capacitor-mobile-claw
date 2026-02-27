@@ -1,88 +1,37 @@
 /**
  * worker-db.js — SQLite persistence layer for mobile-claw Node.js worker.
  *
- * Uses sql.js (WASM SQLite) for ACID transactions, crash-safe writes,
- * and structured queries. Replaces raw JSONL/JSON file persistence.
+ * Delegates all database operations to native SQLite via a JSON-RPC bridge
+ * to the WebView (db-bridge-handler.ts). This replaces the previous sql.js
+ * (WASM SQLite) approach, enabling native SQLite on all platforms including
+ * iOS where WebAssembly is unavailable in Capacitor-NodeJS.
  *
  * Architecture:
- * - sql.js operates in-memory; we persist to disk via atomic tmp+rename
- * - flush() exports the full DB and writes atomically (survives OOM kill)
- * - Auto-flush every 5s to limit data loss window
- * - On init, loads existing DB file or creates fresh
+ * - Worker sends JSON-RPC requests via the Capacitor-NodeJS bridge channel
+ * - WebView-side handler executes them on @capacitor-community/sqlite
+ * - Native SQLite auto-persists — no flush/atomic-write needed
+ * - All functions are async (bridge round-trip)
  */
 
-import { createRequire } from 'node:module';
 import {
   existsSync,
   readFileSync,
   readdirSync,
   statSync,
-  writeFileSync,
-  renameSync,
   mkdirSync,
   openSync,
   writeSync,
   fsyncSync,
   closeSync,
-  unlinkSync,
+  renameSync,
 } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
+import { initDbBridge } from './db-bridge-client.js';
 
-// sql.js uses require-style exports; ESM import needs createRequire
-const _require = createRequire(import.meta.url);
-
-let db = null;
-let dbPath = null;
-let flushTimer = null;
+let bridge = null;
 let _ready = false;
 
-const FLUSH_INTERVAL_MS = 5000;
-const FLUSH_MAX_RETRIES = 3;
-const SCHEMA_VERSION = 2;
-
-// ── Schema ──────────────────────────────────────────────────────────────
-
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS schema_version (
-  version INTEGER PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  session_key TEXT PRIMARY KEY,
-  agent_id TEXT NOT NULL DEFAULT 'main',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  model TEXT,
-  total_tokens INTEGER DEFAULT 0,
-  input_tokens INTEGER DEFAULT 0,
-  output_tokens INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_key TEXT NOT NULL,
-  sequence INTEGER NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  timestamp INTEGER,
-  model TEXT,
-  tool_call_id TEXT,
-  usage_input INTEGER,
-  usage_output INTEGER,
-  UNIQUE(session_key, sequence)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session
-  ON messages(session_key, sequence);
-
-CREATE TABLE IF NOT EXISTS config (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at INTEGER
-);
-`;
-
-// ── Atomic file write helper ────────────────────────────────────────────
+// ── Atomic file write helper (still used by main.js for non-DB writes) ──
 
 export function atomicWrite(filePath, data) {
   const tmpPath = filePath + '.tmp';
@@ -91,7 +40,6 @@ export function atomicWrite(filePath, data) {
     if (typeof data === 'string') {
       writeSync(fd, data);
     } else {
-      // Buffer / Uint8Array
       writeSync(fd, data, 0, data.length);
     }
     fsyncSync(fd);
@@ -104,330 +52,95 @@ export function atomicWrite(filePath, data) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 /**
- * Initialize the SQLite database.
+ * Initialize the SQLite database via native bridge.
  * @param {string} openclawRoot - Root data directory ($OPENCLAW_ROOT)
+ * @param {object} channel - The Capacitor-NodeJS bridge channel
  */
-export async function initWorkerDb(openclawRoot) {
+export async function initWorkerDb(openclawRoot, channel) {
   if (_ready) return;
 
-  dbPath = join(openclawRoot, 'mobile-claw.db');
   mkdirSync(openclawRoot, { recursive: true });
 
-  // Load sql.js — skip entirely if WebAssembly is unavailable (Capacitor-NodeJS v18)
-  // sql.js's WASM and asm.js builds both use Emscripten which references WebAssembly
-  // globals at load time, so we can't even require() it without a real WASM runtime.
-  // The caller (main.js) falls back to JSONL persistence when initWorkerDb throws.
-  if (typeof WebAssembly === 'undefined' || globalThis.WebAssembly?._isStub) {
-    throw new Error('WebAssembly is not available — using JSONL fallback');
-  }
-
-  let SQL;
-  try {
-    const initSqlJs = _require('sql.js');
-    const wasmPath = join(
-      dirname(_require.resolve('sql.js')),
-      'sql-wasm.wasm'
-    );
-    SQL = await initSqlJs({
-      locateFile: () => wasmPath,
-    });
-  } catch (wasmErr) {
-    console.warn(`[worker-db] WASM init failed (${wasmErr.message}), trying asm.js fallback`);
-    try {
-      const initSqlJsAsm = _require('sql.js/dist/sql-asm.js');
-      SQL = await initSqlJsAsm();
-    } catch (asmErr) {
-      console.error(`[worker-db] Both WASM and asm.js failed:`, asmErr.message);
-      throw asmErr;
-    }
-  }
-
-  // Open existing DB or create new
-  if (existsSync(dbPath)) {
-    try {
-      const fileBuffer = readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-      console.log(`[worker-db] Loaded existing DB (${fileBuffer.length} bytes)`);
-    } catch (err) {
-      console.warn(`[worker-db] DB file corrupt (${err.message}), creating fresh`);
-      db = new SQL.Database();
-    }
-  } else {
-    db = new SQL.Database();
-    console.log(`[worker-db] Created new DB`);
-  }
-
-  // Clean up stale tmp file if it exists (crash during previous flush)
-  const tmpPath = dbPath + '.tmp';
-  if (existsSync(tmpPath)) {
-    try { unlinkSync(tmpPath); } catch { /* ignore */ }
-  }
-
-  // Run schema
-  db.run(SCHEMA_SQL);
-
-  // Check and apply migrations
-  _migrate();
-
-  // Evict old sessions and trim oversized ones
-  _evictOldSessions();
-
-  // Start auto-flush timer
-  flushTimer = setInterval(() => {
-    try { flush(); } catch (err) {
-      console.warn(`[worker-db] Auto-flush failed: ${err.message}`);
-    }
-  }, FLUSH_INTERVAL_MS);
-
+  bridge = initDbBridge(channel);
+  await bridge.init();
   _ready = true;
-  console.log(`[worker-db] SQLite initialized (v${SCHEMA_VERSION})`);
+
+  // Evict old sessions (non-blocking)
+  _evictOldSessions().catch(err => {
+    console.warn(`[worker-db] Eviction failed (non-fatal): ${err.message}`);
+  });
+
+  console.log('[worker-db] Native SQLite bridge initialized');
 }
 
 /**
  * Check if the DB is ready for use.
+ * @returns {boolean}
  */
 export function isDbReady() {
-  return _ready && db !== null;
+  return _ready && bridge !== null;
 }
 
 /**
  * Execute a SQL statement (INSERT, UPDATE, DELETE, CREATE).
  * @param {string} sql
  * @param {any[]} [params]
+ * @returns {Promise<{ changes: number, lastId: number }>}
  */
-export function run(sql, params) {
-  if (!db) throw new Error('[worker-db] DB not initialized');
-  db.run(sql, params);
+export async function run(sql, params) {
+  if (!bridge) throw new Error('[worker-db] DB not initialized');
+  return bridge.run(sql, params);
 }
 
 /**
  * Query rows from the database.
  * @param {string} sql
  * @param {any[]} [params]
- * @returns {Object[]} Array of row objects
+ * @returns {Promise<Object[]>} Array of row objects
  */
-export function query(sql, params) {
-  if (!db) throw new Error('[worker-db] DB not initialized');
-  const stmt = db.prepare(sql);
-  if (params) stmt.bind(params);
-
-  const rows = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject());
-  }
-  stmt.free();
-  return rows;
+export async function query(sql, params) {
+  if (!bridge) throw new Error('[worker-db] DB not initialized');
+  return bridge.query(sql, params);
 }
 
 /**
  * Query a single row.
  * @param {string} sql
  * @param {any[]} [params]
- * @returns {Object|null}
+ * @returns {Promise<Object|null>}
  */
-export function queryOne(sql, params) {
-  const rows = query(sql, params);
-  return rows.length > 0 ? rows[0] : null;
+export async function queryOne(sql, params) {
+  if (!bridge) throw new Error('[worker-db] DB not initialized');
+  return bridge.queryOne(sql, params);
 }
 
 /**
- * Run multiple statements inside a transaction.
- * Rolls back on error. Returns the result of the callback.
- * @param {Function} fn - Callback that calls run()/query()
- * @returns {*} Result of fn()
+ * Run multiple statements inside an atomic transaction.
+ * @param {Array<{sql: string, params?: any[]}>} statements
+ * @returns {Promise<{ results: any[] }>}
  */
-export function transaction(fn) {
-  if (!db) throw new Error('[worker-db] DB not initialized');
-  db.run('BEGIN TRANSACTION');
-  try {
-    const result = fn();
-    db.run('COMMIT');
-    return result;
-  } catch (err) {
-    db.run('ROLLBACK');
-    throw err;
-  }
+export async function transaction(statements) {
+  if (!bridge) throw new Error('[worker-db] DB not initialized');
+  return bridge.transaction(statements);
 }
 
 /**
- * Persist the in-memory database to disk atomically.
- * Uses tmp+rename+fsync pattern for crash safety.
+ * No-op — native SQLite auto-persists.
+ * Kept for API compatibility.
  */
-export function flush() {
-  if (!db || !dbPath) return;
-
-  const data = db.export();
-  const buffer = Buffer.from(data);
-
-  let lastErr;
-  for (let attempt = 0; attempt < FLUSH_MAX_RETRIES; attempt++) {
-    try {
-      atomicWrite(dbPath, buffer);
-      return;
-    } catch (err) {
-      lastErr = err;
-      if (attempt < FLUSH_MAX_RETRIES - 1) {
-        // Brief sync delay before retry
-        const start = Date.now();
-        while (Date.now() - start < 100) { /* spin wait — no setTimeout in sync context */ }
-      }
-    }
-  }
-  throw lastErr;
+export async function flush() {
+  // no-op
 }
 
 /**
- * Close the database and stop auto-flush.
+ * Close the database bridge.
  */
 export function close() {
-  if (flushTimer) {
-    clearInterval(flushTimer);
-    flushTimer = null;
-  }
-  if (db) {
-    try { flush(); } catch { /* best effort */ }
-    db.close();
-    db = null;
+  if (bridge) {
+    bridge.destroy();
+    bridge = null;
   }
   _ready = false;
-}
-
-// ── Migration ───────────────────────────────────────────────────────────
-
-function _migrate() {
-  const row = queryOne('SELECT MAX(version) as v FROM schema_version');
-  const currentVersion = row?.v || 0;
-
-  if (currentVersion < 1) {
-    // Schema already created above via SCHEMA_SQL
-    run('INSERT OR REPLACE INTO schema_version (version) VALUES (?)', [1]);
-    console.log(`[worker-db] Migrated to v1`);
-  }
-
-  if (currentVersion < 2) {
-    run(
-      `CREATE TABLE IF NOT EXISTS cron_skills (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        allowed_tools TEXT,
-        system_prompt TEXT,
-        model TEXT,
-        max_turns INTEGER DEFAULT 3,
-        timeout_ms INTEGER DEFAULT 60000,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`
-    );
-
-    run(
-      `CREATE TABLE IF NOT EXISTS cron_jobs (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        session_target TEXT NOT NULL DEFAULT 'isolated',
-        wake_mode TEXT DEFAULT 'next-heartbeat',
-        schedule_kind TEXT NOT NULL,
-        schedule_every_ms INTEGER,
-        schedule_anchor_ms INTEGER,
-        schedule_at_ms INTEGER,
-        skill_id TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        delivery_mode TEXT NOT NULL DEFAULT 'notification',
-        delivery_webhook_url TEXT,
-        delivery_notification_title TEXT,
-        active_hours_start TEXT,
-        active_hours_end TEXT,
-        active_hours_tz TEXT,
-        last_run_at INTEGER,
-        next_run_at INTEGER,
-        last_run_status TEXT,
-        last_error TEXT,
-        last_duration_ms INTEGER,
-        last_response_hash TEXT,
-        last_response_sent_at INTEGER,
-        consecutive_errors INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`
-    );
-    run('CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run_at ON cron_jobs(enabled, next_run_at)');
-
-    run(
-      `CREATE TABLE IF NOT EXISTS cron_runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id TEXT NOT NULL,
-        started_at INTEGER NOT NULL,
-        ended_at INTEGER,
-        status TEXT,
-        duration_ms INTEGER,
-        error TEXT,
-        response_text TEXT,
-        was_heartbeat_ok INTEGER DEFAULT 0,
-        was_deduped INTEGER DEFAULT 0,
-        delivered INTEGER DEFAULT 0,
-        wake_source TEXT
-      )`
-    );
-    run('CREATE INDEX IF NOT EXISTS idx_cron_runs_job_started ON cron_runs(job_id, started_at DESC)');
-
-    run(
-      `CREATE TABLE IF NOT EXISTS heartbeat_config (
-        id INTEGER PRIMARY KEY DEFAULT 1,
-        enabled INTEGER NOT NULL DEFAULT 0,
-        every_ms INTEGER NOT NULL DEFAULT 1800000,
-        prompt TEXT,
-        skill_id TEXT,
-        active_hours_start TEXT,
-        active_hours_end TEXT,
-        active_hours_tz TEXT,
-        next_run_at INTEGER,
-        last_heartbeat_hash TEXT,
-        last_heartbeat_sent_at INTEGER,
-        updated_at INTEGER NOT NULL
-      )`
-    );
-
-    run(
-      `CREATE TABLE IF NOT EXISTS scheduler_config (
-        id INTEGER PRIMARY KEY DEFAULT 1,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        scheduling_mode TEXT NOT NULL DEFAULT 'balanced',
-        run_on_charging INTEGER NOT NULL DEFAULT 1,
-        global_active_hours_start TEXT,
-        global_active_hours_end TEXT,
-        global_active_hours_tz TEXT,
-        updated_at INTEGER NOT NULL
-      )`
-    );
-
-    run(
-      `CREATE TABLE IF NOT EXISTS system_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_key TEXT NOT NULL,
-        context_key TEXT,
-        text TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        consumed INTEGER NOT NULL DEFAULT 0
-      )`
-    );
-    run('CREATE INDEX IF NOT EXISTS idx_system_events_pending ON system_events(session_key, consumed, created_at)');
-
-    const now = Date.now();
-    run(
-      `INSERT OR IGNORE INTO heartbeat_config
-       (id, enabled, every_ms, updated_at)
-       VALUES (1, 0, 1800000, ?)`,
-      [now]
-    );
-    run(
-      `INSERT OR IGNORE INTO scheduler_config
-       (id, enabled, scheduling_mode, run_on_charging, updated_at)
-       VALUES (1, 1, 'balanced', 1, ?)`,
-      [now]
-    );
-    run('INSERT OR REPLACE INTO schema_version (version) VALUES (?)', [2]);
-    console.log('[worker-db] Migrated to v2');
-  }
 }
 
 // ── Session eviction + size management ──────────────────────────────────
@@ -435,106 +148,90 @@ function _migrate() {
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MAX_MESSAGES_PER_SESSION = 5000;
 
-function _evictOldSessions() {
-  try {
-    const cutoff = Date.now() - SESSION_MAX_AGE_MS;
+async function _evictOldSessions() {
+  const cutoff = Date.now() - SESSION_MAX_AGE_MS;
 
-    // Delete messages for expired sessions
-    const expired = query('SELECT session_key FROM sessions WHERE updated_at < ?', [cutoff]);
-    if (expired.length > 0) {
-      run('DELETE FROM messages WHERE session_key IN (SELECT session_key FROM sessions WHERE updated_at < ?)', [cutoff]);
-      run('DELETE FROM sessions WHERE updated_at < ?', [cutoff]);
-      console.log(`[worker-db] Evicted ${expired.length} sessions older than 30 days`);
-    }
+  const expired = await query('SELECT session_key FROM sessions WHERE updated_at < ?', [cutoff]);
+  if (expired.length > 0) {
+    await run('DELETE FROM messages WHERE session_key IN (SELECT session_key FROM sessions WHERE updated_at < ?)', [cutoff]);
+    await run('DELETE FROM sessions WHERE updated_at < ?', [cutoff]);
+    console.log(`[worker-db] Evicted ${expired.length} sessions older than 30 days`);
+  }
 
-    // Trim oversized sessions (keep newest messages)
-    const large = query(
-      `SELECT session_key, COUNT(*) as cnt FROM messages
-       GROUP BY session_key HAVING cnt > ?`,
-      [MAX_MESSAGES_PER_SESSION]
+  const large = await query(
+    `SELECT session_key, COUNT(*) as cnt FROM messages
+     GROUP BY session_key HAVING cnt > ?`,
+    [MAX_MESSAGES_PER_SESSION]
+  );
+  for (const row of large) {
+    const excess = row.cnt - MAX_MESSAGES_PER_SESSION;
+    await run(
+      `DELETE FROM messages WHERE id IN (
+         SELECT id FROM messages WHERE session_key = ?
+         ORDER BY sequence ASC LIMIT ?
+       )`,
+      [row.session_key, excess]
     );
-    for (const row of large) {
-      const excess = row.cnt - MAX_MESSAGES_PER_SESSION;
-      run(
-        `DELETE FROM messages WHERE id IN (
-           SELECT id FROM messages WHERE session_key = ?
-           ORDER BY sequence ASC LIMIT ?
-         )`,
-        [row.session_key, excess]
-      );
-      console.log(`[worker-db] Trimmed ${excess} old messages from session ${row.session_key}`);
-    }
-
-    if (expired.length > 0 || large.length > 0) {
-      flush();
-    }
-  } catch (err) {
-    console.warn(`[worker-db] Eviction failed (non-fatal): ${err.message}`);
+    console.log(`[worker-db] Trimmed ${excess} old messages from session ${row.session_key}`);
   }
 }
 
-// ── JSONL Migration (Phase 3) ───────────────────────────────────────────
+// ── JSONL Migration (one-time, from legacy persistence) ─────────────────
 
 /**
- * Import existing JSONL session files into SQLite.
- * Called once on first run after upgrade.
+ * Import existing JSONL session files into native SQLite.
+ * Called once on first run after upgrade from WASM/JSONL persistence.
  * @param {string} openclawRoot
  * @param {string} agentId
- * @param {Function} deduplicateMessages - existing dedup function from main.js
  */
-export function migrateFromJsonl(openclawRoot, agentId, deduplicateMessages) {
-  // Check if migration already done
-  const migrated = queryOne('SELECT value FROM config WHERE key = ?', ['jsonl_migration_done']);
+export async function migrateFromJsonl(openclawRoot, agentId) {
+  const migrated = await queryOne('SELECT value FROM config WHERE key = ?', ['jsonl_migration_done']);
   if (migrated) return;
 
   const sessionsDir = join(openclawRoot, 'agents', agentId, 'sessions');
   const sessionsJsonPath = join(sessionsDir, 'sessions.json');
 
-  // Load session index
   let sessionIndex = {};
   try {
     const raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8'));
     sessionIndex = raw[agentId] || raw;
   } catch {
-    // Rebuild from JSONL files
-    sessionIndex = _rebuildIndexFromFiles(sessionsDir, agentId);
+    sessionIndex = _rebuildIndexFromFiles(sessionsDir);
   }
 
   const sessionKeys = Object.keys(sessionIndex);
   if (sessionKeys.length === 0) {
-    run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)',
+    await run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)',
       ['jsonl_migration_done', '1', Date.now()]);
-    flush();
     return;
   }
 
   console.log(`[worker-db] Migrating ${sessionKeys.length} sessions from JSONL...`);
 
   let totalMessages = 0;
+  const CHUNK_SIZE = 500;
 
-  transaction(() => {
-    for (const sessionKey of sessionKeys) {
-      const meta = sessionIndex[sessionKey];
-      const jsonlFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
+  for (const sessionKey of sessionKeys) {
+    const meta = sessionIndex[sessionKey];
+    const jsonlFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
 
-      // Insert session metadata
-      run(
-        `INSERT OR REPLACE INTO sessions
+    const statements = [];
+
+    statements.push({
+      sql: `INSERT OR REPLACE INTO sessions
          (session_key, agent_id, created_at, updated_at, model, total_tokens)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          sessionKey,
-          agentId,
-          meta.createdAt || Date.now(),
-          meta.updatedAt || Date.now(),
-          meta.model || 'anthropic/claude-sonnet-4-5',
-          meta.totalTokens || 0,
-        ]
-      );
+      params: [
+        sessionKey,
+        agentId,
+        meta.createdAt || Date.now(),
+        meta.updatedAt || Date.now(),
+        meta.model || 'anthropic/claude-sonnet-4-5',
+        meta.totalTokens || 0,
+      ],
+    });
 
-      // Import messages from JSONL
-      if (!existsSync(jsonlFile)) continue;
-
+    if (existsSync(jsonlFile)) {
       try {
         const raw = readFileSync(jsonlFile, 'utf8');
         const lines = raw.split('\n').filter(l => l.trim());
@@ -543,15 +240,15 @@ export function migrateFromJsonl(openclawRoot, agentId, deduplicateMessages) {
           try { parsed.push(JSON.parse(line)); }
           catch { /* skip corrupted lines */ }
         }
-        const messages = deduplicateMessages(parsed);
+        const messages = _deduplicateMessages(parsed);
 
         for (let i = 0; i < messages.length; i++) {
           const m = messages[i];
-          run(
-            `INSERT OR IGNORE INTO messages
-             (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
+          statements.push({
+            sql: `INSERT OR IGNORE INTO messages
+               (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            params: [
               sessionKey,
               i,
               m.role,
@@ -561,8 +258,8 @@ export function migrateFromJsonl(openclawRoot, agentId, deduplicateMessages) {
               m.toolCallId || null,
               m.usage?.input || null,
               m.usage?.output || null,
-            ]
-          );
+            ],
+          });
           totalMessages++;
         }
       } catch (err) {
@@ -570,11 +267,15 @@ export function migrateFromJsonl(openclawRoot, agentId, deduplicateMessages) {
       }
     }
 
-    run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)',
-      ['jsonl_migration_done', '1', Date.now()]);
-  });
+    // Send in chunks to avoid oversized bridge messages
+    for (let i = 0; i < statements.length; i += CHUNK_SIZE) {
+      await transaction(statements.slice(i, i + CHUNK_SIZE));
+    }
+  }
 
-  flush();
+  await run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)',
+    ['jsonl_migration_done', '1', Date.now()]);
+
   console.log(`[worker-db] Migration complete: ${sessionKeys.length} sessions, ${totalMessages} messages`);
 }
 
@@ -597,7 +298,22 @@ function _rebuildIndexFromFiles(sessionsDir) {
   return index;
 }
 
-// ── Cron/Scheduler/Heartbeat store (Phase 2) ─────────────────────────────
+/**
+ * Remove duplicate messages (legacy JSONL bug).
+ * Checks first 100 chars of content + role combination.
+ */
+function _deduplicateMessages(messages) {
+  const seen = new Set();
+  return messages.filter(m => {
+    const contentStr = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    const key = `${m.role}:${contentStr.slice(0, 100)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ── Cron/Scheduler/Heartbeat store ──────────────────────────────────────
 
 function _toBool(value) {
   return Number(value) === 1;
@@ -723,9 +439,9 @@ function _toCronRunRecord(row) {
   };
 }
 
-function _ensureSchedulerConfigRow() {
+async function _ensureSchedulerConfigRow() {
   const now = Date.now();
-  run(
+  await run(
     `INSERT OR IGNORE INTO scheduler_config
      (id, enabled, scheduling_mode, run_on_charging, updated_at)
      VALUES (1, 1, 'balanced', 1, ?)`,
@@ -733,9 +449,9 @@ function _ensureSchedulerConfigRow() {
   );
 }
 
-function _ensureHeartbeatConfigRow() {
+async function _ensureHeartbeatConfigRow() {
   const now = Date.now();
-  run(
+  await run(
     `INSERT OR IGNORE INTO heartbeat_config
      (id, enabled, every_ms, updated_at)
      VALUES (1, 0, 1800000, ?)`,
@@ -754,14 +470,14 @@ function _resolveNextRunAt(schedule, now = Date.now()) {
   return null;
 }
 
-export function getSchedulerConfig() {
-  _ensureSchedulerConfigRow();
-  const row = queryOne('SELECT * FROM scheduler_config WHERE id = 1');
+export async function getSchedulerConfig() {
+  await _ensureSchedulerConfigRow();
+  const row = await queryOne('SELECT * FROM scheduler_config WHERE id = 1');
   return _toSchedulerConfig(row);
 }
 
-export function setSchedulerConfig(patch = {}) {
-  _ensureSchedulerConfigRow();
+export async function setSchedulerConfig(patch = {}) {
+  await _ensureSchedulerConfigRow();
   const sets = [];
   const params = [];
 
@@ -805,19 +521,18 @@ export function setSchedulerConfig(patch = {}) {
   params.push(Date.now());
   params.push(1);
 
-  run(`UPDATE scheduler_config SET ${sets.join(', ')} WHERE id = ?`, params);
-  flush();
+  await run(`UPDATE scheduler_config SET ${sets.join(', ')} WHERE id = ?`, params);
   return getSchedulerConfig();
 }
 
-export function getHeartbeatConfig() {
-  _ensureHeartbeatConfigRow();
-  const row = queryOne('SELECT * FROM heartbeat_config WHERE id = 1');
+export async function getHeartbeatConfig() {
+  await _ensureHeartbeatConfigRow();
+  const row = await queryOne('SELECT * FROM heartbeat_config WHERE id = 1');
   return _toHeartbeatConfig(row);
 }
 
-export function setHeartbeatConfig(patch = {}) {
-  _ensureHeartbeatConfigRow();
+export async function setHeartbeatConfig(patch = {}) {
+  await _ensureHeartbeatConfigRow();
   const sets = [];
   const params = [];
 
@@ -878,15 +593,14 @@ export function setHeartbeatConfig(patch = {}) {
   params.push(Date.now());
   params.push(1);
 
-  run(`UPDATE heartbeat_config SET ${sets.join(', ')} WHERE id = ?`, params);
-  flush();
+  await run(`UPDATE heartbeat_config SET ${sets.join(', ')} WHERE id = ?`, params);
   return getHeartbeatConfig();
 }
 
-export function addCronSkill(skill) {
+export async function addCronSkill(skill) {
   const now = Date.now();
   const id = skill.id || _genId('skill');
-  run(
+  await run(
     `INSERT INTO cron_skills
      (id, name, allowed_tools, system_prompt, model, max_turns, timeout_ms, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -902,11 +616,11 @@ export function addCronSkill(skill) {
       now,
     ]
   );
-  flush();
-  return _toCronSkillRecord(queryOne('SELECT * FROM cron_skills WHERE id = ?', [id]));
+  const row = await queryOne('SELECT * FROM cron_skills WHERE id = ?', [id]);
+  return _toCronSkillRecord(row);
 }
 
-export function updateCronSkill(id, patch = {}) {
+export async function updateCronSkill(id, patch = {}) {
   const sets = [];
   const params = [];
 
@@ -940,26 +654,25 @@ export function updateCronSkill(id, patch = {}) {
   params.push(Date.now());
   params.push(id);
 
-  run(`UPDATE cron_skills SET ${sets.join(', ')} WHERE id = ?`, params);
-  flush();
+  await run(`UPDATE cron_skills SET ${sets.join(', ')} WHERE id = ?`, params);
 }
 
-export function removeCronSkill(id) {
-  run('DELETE FROM cron_skills WHERE id = ?', [id]);
-  flush();
+export async function removeCronSkill(id) {
+  await run('DELETE FROM cron_skills WHERE id = ?', [id]);
 }
 
-export function listCronSkills() {
-  return query('SELECT * FROM cron_skills ORDER BY updated_at DESC').map(_toCronSkillRecord);
+export async function listCronSkills() {
+  const rows = await query('SELECT * FROM cron_skills ORDER BY updated_at DESC');
+  return rows.map(_toCronSkillRecord);
 }
 
-export function addCronJob(job) {
+export async function addCronJob(job) {
   const now = Date.now();
   const id = job.id || _genId('job');
   const schedule = job.schedule || {};
   const activeHours = job.activeHours || {};
   const nextRunAt = job.nextRunAt ?? _resolveNextRunAt(schedule, now);
-  run(
+  await run(
     `INSERT INTO cron_jobs
      (id, name, enabled, session_target, wake_mode, schedule_kind, schedule_every_ms, schedule_anchor_ms, schedule_at_ms,
       skill_id, prompt, delivery_mode, delivery_webhook_url, delivery_notification_title,
@@ -997,11 +710,11 @@ export function addCronJob(job) {
       now,
     ]
   );
-  flush();
-  return _toCronJobRecord(queryOne('SELECT * FROM cron_jobs WHERE id = ?', [id]));
+  const row = await queryOne('SELECT * FROM cron_jobs WHERE id = ?', [id]);
+  return _toCronJobRecord(row);
 }
 
-export function updateCronJob(id, patch = {}) {
+export async function updateCronJob(id, patch = {}) {
   const sets = [];
   const params = [];
 
@@ -1147,33 +860,33 @@ export function updateCronJob(id, patch = {}) {
   params.push(Date.now());
   params.push(id);
 
-  run(`UPDATE cron_jobs SET ${sets.join(', ')} WHERE id = ?`, params);
-  flush();
+  await run(`UPDATE cron_jobs SET ${sets.join(', ')} WHERE id = ?`, params);
 }
 
-export function removeCronJob(id) {
-  run('DELETE FROM cron_jobs WHERE id = ?', [id]);
-  run('DELETE FROM cron_runs WHERE job_id = ?', [id]);
-  flush();
+export async function removeCronJob(id) {
+  await run('DELETE FROM cron_jobs WHERE id = ?', [id]);
+  await run('DELETE FROM cron_runs WHERE job_id = ?', [id]);
 }
 
-export function listCronJobs() {
-  return query('SELECT * FROM cron_jobs ORDER BY updated_at DESC').map(_toCronJobRecord);
+export async function listCronJobs() {
+  const rows = await query('SELECT * FROM cron_jobs ORDER BY updated_at DESC');
+  return rows.map(_toCronJobRecord);
 }
 
-export function getDueJobs(nowMs = Date.now()) {
-  return query(
+export async function getDueJobs(nowMs = Date.now()) {
+  const rows = await query(
     `SELECT * FROM cron_jobs
      WHERE enabled = 1
        AND next_run_at IS NOT NULL
        AND next_run_at <= ?
      ORDER BY next_run_at ASC`,
     [nowMs]
-  ).map(_toCronJobRecord);
+  );
+  return rows.map(_toCronJobRecord);
 }
 
-export function insertCronRun(runData) {
-  run(
+export async function insertCronRun(runData) {
+  await run(
     `INSERT INTO cron_runs
      (job_id, started_at, ended_at, status, duration_ms, error, response_text, was_heartbeat_ok, was_deduped, delivered, wake_source)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1191,44 +904,46 @@ export function insertCronRun(runData) {
       runData.wakeSource || null,
     ]
   );
-  const row = queryOne('SELECT last_insert_rowid() as id');
-  flush();
+  const row = await queryOne('SELECT last_insert_rowid() as id');
   return row?.id || null;
 }
 
-export function listCronRuns(jobId = null, limit = 50) {
+export async function listCronRuns(jobId = null, limit = 50) {
   const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+  let rows;
   if (jobId) {
-    return query(
+    rows = await query(
       'SELECT * FROM cron_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?',
       [jobId, safeLimit]
-    ).map(_toCronRunRecord);
+    );
+  } else {
+    rows = await query(
+      'SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT ?',
+      [safeLimit]
+    );
   }
-  return query(
-    'SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT ?',
-    [safeLimit]
-  ).map(_toCronRunRecord);
+  return rows.map(_toCronRunRecord);
 }
 
-export function enqueueSystemEvent(sessionKey, contextKey, text) {
+export async function enqueueSystemEvent(sessionKey, contextKey, text) {
   const createdAt = Date.now();
-  run(
+  await run(
     `INSERT INTO system_events
      (session_key, context_key, text, created_at, consumed)
      VALUES (?, ?, ?, ?, 0)`,
     [sessionKey, contextKey || null, text, createdAt]
   );
-  flush();
 }
 
-export function peekPendingEvents(sessionKey) {
-  return query(
+export async function peekPendingEvents(sessionKey) {
+  const rows = await query(
     `SELECT id, session_key, context_key, text, created_at, consumed
      FROM system_events
      WHERE session_key = ? AND consumed = 0
      ORDER BY created_at ASC, id ASC`,
     [sessionKey]
-  ).map((row) => ({
+  );
+  return rows.map((row) => ({
     id: row.id,
     sessionKey: row.session_key,
     contextKey: row.context_key || undefined,
@@ -1238,9 +953,8 @@ export function peekPendingEvents(sessionKey) {
   }));
 }
 
-export function consumePendingEvents(ids = []) {
+export async function consumePendingEvents(ids = []) {
   if (!Array.isArray(ids) || ids.length === 0) return;
   const placeholders = ids.map(() => '?').join(', ');
-  run(`UPDATE system_events SET consumed = 1 WHERE id IN (${placeholders})`, ids);
-  flush();
+  await run(`UPDATE system_events SET consumed = 1 WHERE id IN (${placeholders})`, ids);
 }

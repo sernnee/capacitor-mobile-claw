@@ -11,7 +11,7 @@
  * - Code execution (JS VM sandbox + Python Pyodide sandbox)
  * - Git tools (isomorphic-git)
  * - Pre-execution hook (tool.pre_execute — consumer controls approval policy)
- * - Session management (JSONL transcripts)
+ * - Session management (native SQLite via bridge)
  * - Auth profile management (auth-profiles.json)
  */
 
@@ -77,11 +77,11 @@ import {
   existsSync, mkdirSync, readFileSync, writeFileSync,
 } from 'node:fs';
 
-// ── SQLite persistence layer ──────────────────────────────────────────────
+// ── SQLite persistence layer (native bridge) ────────────────────────────────
 import {
   initWorkerDb, isDbReady,
-  run as dbRun, query as dbQuery, queryOne as dbQueryOne,
-  transaction as dbTransaction, flush as dbFlush,
+  query as dbQuery, queryOne as dbQueryOne,
+  transaction as dbTransaction,
   getSchedulerConfig, setSchedulerConfig,
   getHeartbeatConfig, setHeartbeatConfig,
   addCronSkill, updateCronSkill, removeCronSkill, listCronSkills,
@@ -1207,44 +1207,6 @@ function extractUsage(agent) {
   return { inputTokens: input, outputTokens: output, totalTokens: input + output };
 }
 
-// Deduplicate messages loaded from JSONL (handles legacy duplication bug)
-function deduplicateMessages(messages) {
-  const seen = new Set();
-  return messages.filter(m => {
-    const contentKey = typeof m.content === 'string'
-      ? m.content.substring(0, 100)
-      : JSON.stringify(m.content).substring(0, 100);
-    const key = `${m.role}:${m.timestamp || ''}:${contentKey}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// Rebuild sessions.json index from JSONL files on disk (recovery path)
-function rebuildSessionIndex(agentId) {
-  const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-  try {
-    const jsonlFiles = readdirSync(sessionsDir).filter(f => f.endsWith('.jsonl'));
-    const index = { [agentId]: {} };
-    for (const file of jsonlFiles) {
-      const sessionKey = file.replace('.jsonl', '').replace('_', '/');
-      const stat = statSync(join(sessionsDir, file));
-      index[agentId][sessionKey] = {
-        sessionId: sessionKey,
-        createdAt: stat.birthtimeMs || stat.ctimeMs,
-        updatedAt: stat.mtimeMs,
-        model: 'anthropic/claude-sonnet-4-5',
-        totalTokens: 0,
-      };
-    }
-    console.log(`[rebuildSessionIndex] Rebuilt index with ${jsonlFiles.length} sessions`);
-    return index;
-  } catch {
-    return { [agentId]: {} };
-  }
-}
-
 // Helper: parse JSON string or return as-is if already an object/array
 function _parseJsonSafe(value) {
   if (typeof value !== 'string') return value;
@@ -1297,49 +1259,41 @@ function _convertToUiMessages(messages) {
   return uiMessages;
 }
 
-function saveSession(agent, agentId, sessionKey, startTime) {
-  if (!isDbReady()) {
-    // Fallback to JSONL if DB not ready (should not happen in normal flow)
-    _saveSessionJsonlFallback(agent, agentId, sessionKey, startTime);
-    return;
-  }
+async function saveSession(agent, agentId, sessionKey, startTime) {
+  if (!isDbReady()) return;
 
   const allMessages = agent.state.messages;
   const usage = extractUsage(agent);
 
   try {
-    dbTransaction(() => {
-      // Persist new messages since last save
-      for (let i = persistedMessageCount; i < allMessages.length; i++) {
-        const m = allMessages[i];
-        dbRun(
-          `INSERT OR IGNORE INTO messages
+    const statements = [];
+    for (let i = persistedMessageCount; i < allMessages.length; i++) {
+      const m = allMessages[i];
+      statements.push({
+        sql: `INSERT OR IGNORE INTO messages
            (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            sessionKey, i, m.role,
-            typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-            m.timestamp || null, m.model || null, m.toolCallId || null,
-            m.usage?.input || null, m.usage?.output || null,
-          ]
-        );
-      }
-
-      // Update session metadata atomically with messages
-      dbRun(
-        `INSERT OR REPLACE INTO sessions
+        params: [
+          sessionKey, i, m.role,
+          typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          m.timestamp || null, m.model || null, m.toolCallId || null,
+          m.usage?.input || null, m.usage?.output || null,
+        ],
+      });
+    }
+    statements.push({
+      sql: `INSERT OR REPLACE INTO sessions
          (session_key, agent_id, created_at, updated_at, model, total_tokens, input_tokens, output_tokens)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          sessionKey, agentId, startTime, Date.now(),
-          'anthropic/claude-sonnet-4-5', usage.totalTokens,
-          usage.inputTokens, usage.outputTokens,
-        ]
-      );
+      params: [
+        sessionKey, agentId, startTime, Date.now(),
+        'anthropic/claude-sonnet-4-5', usage.totalTokens,
+        usage.inputTokens, usage.outputTokens,
+      ],
     });
 
+    await dbTransaction(statements);
     persistedMessageCount = allMessages.length;
-    dbFlush(); // Atomic write to disk — survives OOM kill
   } catch (err) {
     console.warn(`[saveSession] SQLite save failed: ${err.message}`);
     channel.send('message', {
@@ -1351,74 +1305,33 @@ function saveSession(agent, agentId, sessionKey, startTime) {
   }
 }
 
-// Legacy fallback — only used if SQLite init fails
-function _saveSessionJsonlFallback(agent, agentId, sessionKey, startTime) {
-  const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-  const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-  const allMessages = agent.state.messages;
-  for (let i = persistedMessageCount; i < allMessages.length; i++) {
-    nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
-  }
-  persistedMessageCount = allMessages.length;
-  const usage = extractUsage(agent);
-  const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-  try {
-    let index = {};
-    try { index = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); } catch {
-      index = rebuildSessionIndex(agentId);
-    }
-    if (!index[agentId]) index[agentId] = {};
-    index[agentId][sessionKey] = {
-      sessionId: sessionKey, createdAt: startTime, updatedAt: Date.now(),
-      model: 'anthropic/claude-sonnet-4-5', totalTokens: usage.totalTokens,
-    };
-    const tmpPath = sessionsJsonPath + '.tmp';
-    writeFileSync(tmpPath, JSON.stringify(index, null, 2));
-    renameSync(tmpPath, sessionsJsonPath);
-  } catch { /* non-fatal */ }
-}
-
 // ── Mid-turn checkpoint helper ────────────────────────────────────────────
 
-function _checkpointMessages(agent, agentId, sessionKey) {
-  if (!isDbReady()) {
-    // Fallback: append to JSONL
-    try {
-      const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-      mkdirSync(sessionsDir, { recursive: true });
-      const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-      const allMessages = agent.state.messages;
-      for (let i = persistedMessageCount; i < allMessages.length; i++) {
-        nodeFs.appendFileSync(sessionFile, JSON.stringify(allMessages[i]) + '\n');
-      }
-      persistedMessageCount = allMessages.length;
-    } catch { /* non-fatal */ }
-    return;
-  }
+async function _checkpointMessages(agent, agentId, sessionKey) {
+  if (!isDbReady()) return;
 
   try {
     const allMessages = agent.state.messages;
     if (persistedMessageCount >= allMessages.length) return; // nothing new
 
-    dbTransaction(() => {
-      for (let i = persistedMessageCount; i < allMessages.length; i++) {
-        const m = allMessages[i];
-        dbRun(
-          `INSERT OR IGNORE INTO messages
+    const statements = [];
+    for (let i = persistedMessageCount; i < allMessages.length; i++) {
+      const m = allMessages[i];
+      statements.push({
+        sql: `INSERT OR IGNORE INTO messages
            (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            sessionKey, i, m.role,
-            typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-            m.timestamp || null, m.model || null, m.toolCallId || null,
-            m.usage?.input || null, m.usage?.output || null,
-          ]
-        );
-      }
-    });
+        params: [
+          sessionKey, i, m.role,
+          typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          m.timestamp || null, m.model || null, m.toolCallId || null,
+          m.usage?.input || null, m.usage?.output || null,
+        ],
+      });
+    }
 
+    await dbTransaction(statements);
     persistedMessageCount = allMessages.length;
-    dbFlush(); // Atomic persist to disk
   } catch (err) {
     console.warn(`[checkpoint] SQLite checkpoint failed: ${err.message}`);
     // Do NOT increment persistedMessageCount — retry on next checkpoint
@@ -2227,7 +2140,7 @@ channel.addListener('message', async (event) => {
 
     case 'heartbeat.set': {
       try {
-        const heartbeat = setHeartbeatConfig(msg.config || {});
+        const heartbeat = await setHeartbeatConfig(msg.config || {});
         channel.send('message', {
           type: 'heartbeat.set.result',
           success: true,
@@ -2245,7 +2158,7 @@ channel.addListener('message', async (event) => {
 
     case 'scheduler.set': {
       try {
-        const scheduler = setSchedulerConfig(msg.config || {});
+        const scheduler = await setSchedulerConfig(msg.config || {});
         channel.send('message', {
           type: 'scheduler.set.result',
           success: true,
@@ -2262,19 +2175,28 @@ channel.addListener('message', async (event) => {
     }
 
     case 'scheduler.get': {
-      const scheduler = getSchedulerConfig();
-      const heartbeat = getHeartbeatConfig();
-      channel.send('message', {
-        type: 'scheduler.get.result',
-        scheduler,
-        heartbeat,
-      });
+      try {
+        const scheduler = await getSchedulerConfig();
+        const heartbeat = await getHeartbeatConfig();
+        channel.send('message', {
+          type: 'scheduler.get.result',
+          scheduler,
+          heartbeat,
+        });
+      } catch (err) {
+        channel.send('message', {
+          type: 'scheduler.get.result',
+          scheduler: { enabled: false },
+          heartbeat: { enabled: false },
+          error: err.message,
+        });
+      }
       break;
     }
 
     case 'cron.job.add': {
       try {
-        const job = addCronJob(msg.job || {});
+        const job = await addCronJob(msg.job || {});
         channel.send('message', { type: 'cron.job.add.result', success: true, job });
       } catch (err) {
         channel.send('message', { type: 'cron.job.add.result', success: false, error: err.message });
@@ -2284,7 +2206,7 @@ channel.addListener('message', async (event) => {
 
     case 'cron.job.update': {
       try {
-        updateCronJob(msg.id, msg.patch || {});
+        await updateCronJob(msg.id, msg.patch || {});
         channel.send('message', { type: 'cron.job.update.result', success: true });
       } catch (err) {
         channel.send('message', { type: 'cron.job.update.result', success: false, error: err.message });
@@ -2294,7 +2216,7 @@ channel.addListener('message', async (event) => {
 
     case 'cron.job.remove': {
       try {
-        removeCronJob(msg.id);
+        await removeCronJob(msg.id);
         channel.send('message', { type: 'cron.job.remove.result', success: true });
       } catch (err) {
         channel.send('message', { type: 'cron.job.remove.result', success: false, error: err.message });
@@ -2303,7 +2225,7 @@ channel.addListener('message', async (event) => {
     }
 
     case 'cron.job.list': {
-      const jobs = listCronJobs();
+      const jobs = await listCronJobs();
       channel.send('message', { type: 'cron.job.list.result', jobs });
       break;
     }
@@ -2315,14 +2237,14 @@ channel.addListener('message', async (event) => {
     }
 
     case 'cron.runs.list': {
-      const runs = listCronRuns(msg.jobId, msg.limit);
+      const runs = await listCronRuns(msg.jobId, msg.limit);
       channel.send('message', { type: 'cron.runs.list.result', runs });
       break;
     }
 
     case 'cron.skill.add': {
       try {
-        const skill = addCronSkill(msg.skill || {});
+        const skill = await addCronSkill(msg.skill || {});
         channel.send('message', { type: 'cron.skill.add.result', success: true, skill });
       } catch (err) {
         channel.send('message', { type: 'cron.skill.add.result', success: false, error: err.message });
@@ -2332,7 +2254,7 @@ channel.addListener('message', async (event) => {
 
     case 'cron.skill.update': {
       try {
-        updateCronSkill(msg.id, msg.patch || {});
+        await updateCronSkill(msg.id, msg.patch || {});
         channel.send('message', { type: 'cron.skill.update.result', success: true });
       } catch (err) {
         channel.send('message', { type: 'cron.skill.update.result', success: false, error: err.message });
@@ -2342,7 +2264,7 @@ channel.addListener('message', async (event) => {
 
     case 'cron.skill.remove': {
       try {
-        removeCronSkill(msg.id);
+        await removeCronSkill(msg.id);
         channel.send('message', { type: 'cron.skill.remove.result', success: true });
       } catch (err) {
         channel.send('message', { type: 'cron.skill.remove.result', success: false, error: err.message });
@@ -2351,7 +2273,7 @@ channel.addListener('message', async (event) => {
     }
 
     case 'cron.skill.list': {
-      const skills = listCronSkills();
+      const skills = await listCronSkills();
       channel.send('message', { type: 'cron.skill.list.result', skills });
       break;
     }
@@ -2359,41 +2281,20 @@ channel.addListener('message', async (event) => {
     case 'session.list': {
       const agentId = msg.agentId || 'main';
       let sessions = [];
-      if (isDbReady()) {
-        try {
-          sessions = dbQuery(
-            'SELECT session_key, agent_id, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC',
-            [agentId]
-          ).map(s => ({
-            sessionKey: s.session_key,
-            sessionId: s.session_key,
-            updatedAt: s.updated_at || s.created_at || 0,
-            model: s.model,
-            totalTokens: s.total_tokens,
-          }));
-        } catch (err) {
-          console.warn(`[session.list] SQLite query failed: ${err.message}`);
-        }
-      }
-      // Fallback to sessions.json if SQLite empty or unavailable
-      if (sessions.length === 0) {
-        const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
-        try {
-          let raw;
-          try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
-          catch { raw = rebuildSessionIndex(agentId); }
-          const entries = raw[agentId] || raw;
-          sessions = Object.values(entries)
-            .filter(s => s && typeof s === 'object' && s.sessionId)
-            .map(s => ({
-              sessionKey: s.sessionId,
-              sessionId: s.sessionId,
-              updatedAt: s.updatedAt || s.createdAt || 0,
-              model: s.model,
-              totalTokens: s.totalTokens,
-            }));
-          sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        } catch { /* No sessions yet */ }
+      try {
+        const rows = await dbQuery(
+          'SELECT session_key, agent_id, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC',
+          [agentId]
+        );
+        sessions = rows.map(s => ({
+          sessionKey: s.session_key,
+          sessionId: s.session_key,
+          updatedAt: s.updated_at || s.created_at || 0,
+          model: s.model,
+          totalTokens: s.total_tokens,
+        }));
+      } catch (err) {
+        console.warn(`[session.list] SQLite query failed: ${err.message}`);
       }
       channel.send('message', { type: 'session.list.result', agentId, sessions });
       break;
@@ -2412,37 +2313,23 @@ channel.addListener('message', async (event) => {
     case 'session.latest': {
       const agentId = msg.agentId || 'main';
       let latest = null;
-      if (isDbReady()) {
-        try {
-          const row = dbQueryOne(
-            'SELECT session_key, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 1',
-            [agentId]
-          );
-          if (row) {
-            latest = {
-              sessionId: row.session_key,
-              sessionKey: row.session_key,
-              createdAt: row.created_at,
-              updatedAt: row.updated_at,
-              model: row.model,
-              totalTokens: row.total_tokens,
-            };
-          }
-        } catch { /* fall through to JSON fallback */ }
-      }
-      // Fallback to sessions.json if SQLite has nothing
-      if (!latest) {
-        const sessionsJsonPath = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json');
-        try {
-          let raw;
-          try { raw = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')); }
-          catch { raw = rebuildSessionIndex(agentId); }
-          const entries = raw[agentId] || raw;
-          const sorted = Object.values(entries)
-            .filter(s => s && typeof s === 'object' && s.sessionId)
-            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-          latest = sorted[0] || null;
-        } catch { /* no sessions */ }
+      try {
+        const row = await dbQueryOne(
+          'SELECT session_key, created_at, updated_at, model, total_tokens FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 1',
+          [agentId]
+        );
+        if (row) {
+          latest = {
+            sessionId: row.session_key,
+            sessionKey: row.session_key,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            model: row.model,
+            totalTokens: row.total_tokens,
+          };
+        }
+      } catch (err) {
+        console.warn(`[session.latest] SQLite query failed: ${err.message}`);
       }
       channel.send('message', {
         type: 'session.latest.result',
@@ -2461,46 +2348,28 @@ channel.addListener('message', async (event) => {
       }
 
       let rawMessages = null;
-
-      // Try SQLite first
-      if (isDbReady()) {
-        try {
-          const rows = dbQuery(
-            'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
-            [sessionKey]
-          );
-          if (rows.length > 0) {
-            rawMessages = rows.map(r => ({
-              role: r.role,
-              content: _parseJsonSafe(r.content),
-              timestamp: r.timestamp,
-              model: r.model,
-              toolCallId: r.tool_call_id,
-              usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
-            }));
-          }
-        } catch (err) {
-          console.warn(`[session.load] SQLite query failed: ${err.message}`);
+      try {
+        const rows = await dbQuery(
+          'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
+          [sessionKey]
+        );
+        if (rows.length > 0) {
+          rawMessages = rows.map(r => ({
+            role: r.role,
+            content: _parseJsonSafe(r.content),
+            timestamp: r.timestamp,
+            model: r.model,
+            toolCallId: r.tool_call_id,
+            usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
+          }));
         }
+      } catch (err) {
+        console.warn(`[session.load] SQLite query failed: ${err.message}`);
       }
 
-      // Fallback to JSONL if SQLite has nothing
       if (!rawMessages) {
-        const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-        const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-        try {
-          const raw = readFileSync(sessionFile, 'utf8');
-          const lines = raw.split('\n').filter(l => l.trim());
-          const parsed = [];
-          for (const line of lines) {
-            try { parsed.push(JSON.parse(line)); }
-            catch { console.warn(`[session.load] Skipping corrupted JSONL line: ${line.substring(0, 80)}`); }
-          }
-          rawMessages = deduplicateMessages(parsed);
-        } catch (err) {
-          channel.send('message', { type: 'session.load.result', sessionKey, error: err.message, messages: [] });
-          break;
-        }
+        channel.send('message', { type: 'session.load.result', sessionKey, error: 'Session not found', messages: [] });
+        break;
       }
 
       // Convert to UI message format
@@ -2530,38 +2399,29 @@ channel.addListener('message', async (event) => {
       }
 
       try {
-        // Load messages from SQLite first, fallback to JSONL
         let agentMessages = null;
-        if (isDbReady()) {
-          try {
-            const rows = dbQuery(
-              'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
-              [sessionKey]
-            );
-            if (rows.length > 0) {
-              agentMessages = rows.map(r => ({
-                role: r.role,
-                content: _parseJsonSafe(r.content),
-                timestamp: r.timestamp,
-                model: r.model,
-                toolCallId: r.tool_call_id,
-                usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
-              }));
-            }
-          } catch { /* fall through to JSONL */ }
+        try {
+          const rows = await dbQuery(
+            'SELECT role, content, timestamp, model, tool_call_id, usage_input, usage_output FROM messages WHERE session_key = ? ORDER BY sequence',
+            [sessionKey]
+          );
+          if (rows.length > 0) {
+            agentMessages = rows.map(r => ({
+              role: r.role,
+              content: _parseJsonSafe(r.content),
+              timestamp: r.timestamp,
+              model: r.model,
+              toolCallId: r.tool_call_id,
+              usage: (r.usage_input || r.usage_output) ? { input: r.usage_input, output: r.usage_output } : undefined,
+            }));
+          }
+        } catch (err) {
+          console.warn(`[session.resume] SQLite query failed: ${err.message}`);
         }
 
         if (!agentMessages) {
-          const sessionsDir = join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
-          const sessionFile = join(sessionsDir, `${sessionKey.replace('/', '_')}.jsonl`);
-          const raw = readFileSync(sessionFile, 'utf8');
-          const lines = raw.split('\n').filter(l => l.trim());
-          const rawMessages = [];
-          for (const line of lines) {
-            try { rawMessages.push(JSON.parse(line)); }
-            catch { console.warn(`[session.resume] Skipping corrupted JSONL line`); }
-          }
-          agentMessages = deduplicateMessages(rawMessages);
+          channel.send('message', { type: 'session.resume.result', error: 'Session not found' });
+          break;
         }
 
         const systemPrompt = loadSystemPrompt();
@@ -2668,17 +2528,19 @@ ensureOpenClawDirs();
 console.error(`[DEBUG] Dirs ensured. Sending worker.loading_phase=engine`);
 channel.send('message', { type: 'worker.loading_phase', phase: 'engine' });
 
-// Initialize SQLite, migrate legacy JSONL data, then signal ready and warm MCP discovery
-initWorkerDb(OPENCLAW_ROOT).then(() => {
+// Initialize native SQLite via bridge, migrate legacy JSONL data, then signal ready
+initWorkerDb(OPENCLAW_ROOT, channel).then(async () => {
   channel.send('message', { type: 'worker.loading_phase', phase: 'database' });
-  // Migrate existing JSONL sessions into SQLite (one-time, idempotent)
+  channel.send('message', { type: 'worker.db_status', ready: true });
+  // Migrate existing JSONL sessions into native SQLite (one-time, idempotent)
   try {
-    migrateFromJsonl(OPENCLAW_ROOT, 'main', deduplicateMessages);
+    await migrateFromJsonl(OPENCLAW_ROOT, 'main');
   } catch (err) {
     console.warn(`[init] JSONL migration failed (non-fatal): ${err.message}`);
   }
 }).catch(err => {
-  console.error(`[DEBUG] SQLite init failed, using JSONL fallback: ${err.message}`);
+  console.error(`[DEBUG] Native SQLite init failed: ${err.message}`);
+  channel.send('message', { type: 'worker.db_status', ready: false, error: err.message });
 }).finally(() => {
   try {
     console.error(`[DEBUG] .finally() entered — sending worker.ready`);

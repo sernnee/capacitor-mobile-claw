@@ -32,6 +32,7 @@ import type {
   ToolInvokeResult,
 } from './definitions'
 import { McpServerManager, type McpServerOptions } from './mcp/mcp-server-manager'
+import { DbBridgeHandler } from './services/db-bridge-handler'
 
 type MessageHandler = (msg: any) => void
 
@@ -52,6 +53,7 @@ export class MobileClawEngine {
   private listeners = new Map<string, Set<MessageHandler>>()
   private initPromise: Promise<MobileClawReadyInfo> | null = null
   private _mcpManager: McpServerManager | null = null
+  private _dbHandler: DbBridgeHandler | null = null
   private _mobileCron: any = null
 
   // ── Public getters ─────────────────────────────────────────────────────
@@ -135,6 +137,10 @@ export class MobileClawEngine {
       this._onMessage('worker.loading_phase', (msg) => {
         if (msg?.phase) this._loadingPhase = msg.phase
       })
+
+      // Start DB bridge handler — must be ready before worker sends db.init
+      this._dbHandler = new DbBridgeHandler(this.nodePlugin)
+      this._dbHandler.start()
 
       // Set up worker.ready promise before MCP init (captures early ready events)
       const timeout = options.workerTimeout ?? 60_000

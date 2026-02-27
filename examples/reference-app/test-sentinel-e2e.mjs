@@ -254,8 +254,8 @@ await section('4. Heartbeat Wake → HEARTBEAT_OK Suppression', async () => {
   assert('reason == heartbeat_ok', completed?.reason, 'heartbeat_ok');
   assertTruthy('durationMs > 0', (completed?.durationMs ?? 0) > 0);
 
-  const events = await getEvents();
-  const schedStatus = events.find(e => e.__type === 'schedulerStatus');
+  // schedulerStatus is emitted async (DB queries), wait briefly for it
+  const schedStatus = await waitForEvent('schedulerStatus', 5000).catch(() => null);
   assertTruthy('schedulerStatus emitted after heartbeat', !!schedStatus);
   assertTruthy('heartbeatNext is in future', (schedStatus?.heartbeatNext ?? 0) > Date.now());
 });
@@ -514,9 +514,9 @@ await section('15. Consecutive Heartbeat Runs', async () => {
   assertIncludes('status is suppressed or deduped',
     'suppressed,deduped', completed?.status ?? '');
 
-  const events = await getEvents();
-  const schedStatusEvents = events.filter(e => e.__type === 'schedulerStatus');
-  assertTruthy('schedulerStatus emitted', schedStatusEvents.length > 0);
+  // schedulerStatus is emitted async (DB queries), wait briefly for it
+  const schedStatus = await waitForEvent('schedulerStatus', 5000).catch(() => null);
+  assertTruthy('schedulerStatus emitted', !!schedStatus);
 });
 
 // ── 16. Run history after runs ────────────────────────────────────────────

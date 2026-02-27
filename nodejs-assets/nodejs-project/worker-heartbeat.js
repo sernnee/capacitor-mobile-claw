@@ -4,7 +4,7 @@ import {
   isDbReady,
   run as dbRun,
   queryOne as dbQueryOne,
-  flush as dbFlush,
+  transaction as dbTransaction,
   getSchedulerConfig,
   getHeartbeatConfig,
   setHeartbeatConfig,
@@ -43,18 +43,18 @@ export async function handleHeartbeatWake(source = 'manual', opts = {}) {
 
   wakeInFlight = true;
   try {
-    const scheduler = getSchedulerConfig();
+    const scheduler = await getSchedulerConfig();
     const isManual = source === 'manual' || opts.force === true;
 
     if (!isManual && !scheduler?.enabled) {
       _emit('heartbeat.skipped', { reason: 'scheduler_disabled' });
-      _emitSchedulerStatus({ scheduler });
+      await _emitSchedulerStatus({ scheduler });
       return;
     }
 
     if (!isManual && deps.isUserTurnActive?.()) {
       _emit('heartbeat.skipped', { reason: 'user_active' });
-      _emitSchedulerStatus({ scheduler });
+      await _emitSchedulerStatus({ scheduler });
       return;
     }
 
@@ -88,7 +88,7 @@ export async function handleHeartbeatWake(source = 'manual', opts = {}) {
       });
     }
 
-    _emitSchedulerStatus({ scheduler: getSchedulerConfig() });
+    await _emitSchedulerStatus({ scheduler: await getSchedulerConfig() });
   } catch (err) {
     const durationMs = 0;
     _emit('heartbeat.completed', {
@@ -105,9 +105,9 @@ function _emit(type, payload = {}) {
   deps.channel.send('message', { type, ...payload });
 }
 
-function _emitSchedulerStatus({ scheduler }) {
-  const heartbeat = getHeartbeatConfig();
-  const dueJobs = getDueJobs(Date.now());
+async function _emitSchedulerStatus({ scheduler }) {
+  const heartbeat = await getHeartbeatConfig();
+  const dueJobs = await getDueJobs(Date.now());
   _emit('scheduler.status', {
     enabled: !!scheduler?.enabled,
     mode: scheduler?.schedulingMode || 'balanced',
@@ -118,7 +118,7 @@ function _emitSchedulerStatus({ scheduler }) {
 
 async function _runHeartbeatCycle(params) {
   const now = params.now ?? Date.now();
-  const config = getHeartbeatConfig();
+  const config = await getHeartbeatConfig();
   if (!params.force && !config?.enabled) {
     return { status: 'skipped', reason: 'heartbeat_disabled' };
   }
@@ -133,21 +133,21 @@ async function _runHeartbeatCycle(params) {
     config.activeHours?.tz
   )) {
     const nextRunAt = now + Math.max(15_000, Number(config.everyMs) || 1_800_000);
-    setHeartbeatConfig({ nextRunAt });
+    await setHeartbeatConfig({ nextRunAt });
     return { status: 'skipped', reason: 'outside_active_hours' };
   }
 
-  const heartbeatSkill = _resolveSkill(config.skillId);
+  const heartbeatSkill = await _resolveSkill(config.skillId);
   const sessionKey =
     params.forceSessionKey || deps.getCurrentSessionKey?.() || `main/${Date.now()}`;
 
-  const pendingEvents = peekPendingEvents(sessionKey);
+  const pendingEvents = await peekPendingEvents(sessionKey);
   const prompt = _buildHeartbeatPrompt({
     basePrompt: config.prompt || DEFAULT_HEARTBEAT_PROMPT,
     pendingEvents,
   });
 
-  const transcriptState = captureTranscriptState('main', sessionKey, deps.OPENCLAW_ROOT);
+  const transcriptState = await captureTranscriptState('main', sessionKey, deps.OPENCLAW_ROOT);
   const startedAt = Date.now();
 
   try {
@@ -171,11 +171,11 @@ async function _runHeartbeatCycle(params) {
       if (runResult.agent && typeof runResult.preMessageCount === 'number') {
         _pruneInMemoryMessages(runResult.agent, runResult.preMessageCount);
       }
-      pruneHeartbeatTranscript(transcriptState, sessionKey);
+      await pruneHeartbeatTranscript(transcriptState, sessionKey);
       if (pendingEvents.length > 0) {
-        consumePendingEvents(pendingEvents.map((e) => e.id));
+        await consumePendingEvents(pendingEvents.map((e) => e.id));
       }
-      setHeartbeatConfig({
+      await setHeartbeatConfig({
         nextRunAt: startedAt + (Number(config.everyMs) || 1_800_000),
       });
 
@@ -193,7 +193,7 @@ async function _runHeartbeatCycle(params) {
     if (runResult.usedExistingAgent) {
       deps.persistCurrentSession?.(startedAt, 'main', sessionKey);
     } else if (runResult.agent) {
-      _persistEphemeralAgentSession(runResult.agent, sessionKey, startedAt);
+      await _persistEphemeralAgentSession(runResult.agent, sessionKey, startedAt);
     }
 
     _emit('cron.notification', {
@@ -203,10 +203,10 @@ async function _runHeartbeatCycle(params) {
     });
 
     if (pendingEvents.length > 0) {
-      consumePendingEvents(pendingEvents.map((e) => e.id));
+      await consumePendingEvents(pendingEvents.map((e) => e.id));
     }
 
-    setHeartbeatConfig({
+    await setHeartbeatConfig({
       nextRunAt: startedAt + (Number(config.everyMs) || 1_800_000),
       lastHash: hash,
       lastSentAt: startedAt,
@@ -220,19 +220,19 @@ async function _runHeartbeatCycle(params) {
     heartbeatConsecutiveErrors += 1;
     const normalNext = startedAt + (Number(config.everyMs) || 1_800_000);
     const backoffNext = startedAt + errorBackoffMs(heartbeatConsecutiveErrors);
-    setHeartbeatConfig({ nextRunAt: Math.max(normalNext, backoffNext) });
+    await setHeartbeatConfig({ nextRunAt: Math.max(normalNext, backoffNext) });
     return { status: 'error', reason: err?.message || 'heartbeat_error' };
   }
 }
 
 async function _runDueCronJobs(params) {
   const now = params.now ?? Date.now();
-  const skills = listCronSkills();
+  const skills = await listCronSkills();
   const skillById = new Map(skills.map((s) => [s.id, s]));
-  const allJobs = listCronJobs();
+  const allJobs = await listCronJobs();
   const dueJobs = params.forceJobId
     ? allJobs.filter((job) => job.id === params.forceJobId)
-    : getDueJobs(now);
+    : await getDueJobs(now);
 
   for (const job of dueJobs) {
     const startedAt = Date.now();
@@ -242,12 +242,12 @@ async function _runDueCronJobs(params) {
 
     if (!isWithinActiveHours(job.activeHours?.start, job.activeHours?.end, job.activeHours?.tz)) {
       const nextRunAt = _computeNextRunAt(job, now);
-      updateCronJob(job.id, {
+      await updateCronJob(job.id, {
         lastRunAt: startedAt,
         nextRunAt,
         lastRunStatus: 'skipped',
       });
-      insertCronRun({
+      await insertCronRun({
         jobId: job.id,
         startedAt,
         endedAt: Date.now(),
@@ -263,7 +263,7 @@ async function _runDueCronJobs(params) {
       if (job.sessionTarget === 'main') {
         const sessionKey = deps.getCurrentSessionKey?.() || `main/${Date.now()}`;
         const contextKey = `cron:${job.id}:${startedAt}`;
-        enqueueSystemEvent(sessionKey, contextKey, job.prompt);
+        await enqueueSystemEvent(sessionKey, contextKey, job.prompt);
 
         if (job.wakeMode === 'now' || params.forceJobId === job.id) {
           await _runHeartbeatCycle({
@@ -275,7 +275,7 @@ async function _runDueCronJobs(params) {
         }
 
         const nextRunAt = _computeNextRunAt(job, startedAt);
-        updateCronJob(job.id, {
+        await updateCronJob(job.id, {
           lastRunAt: startedAt,
           nextRunAt,
           lastRunStatus: 'ok',
@@ -284,7 +284,7 @@ async function _runDueCronJobs(params) {
           consecutiveErrors: 0,
         });
 
-        insertCronRun({
+        await insertCronRun({
           jobId: job.id,
           startedAt,
           endedAt: Date.now(),
@@ -333,7 +333,7 @@ async function _runDueCronJobs(params) {
       const nextRunAt = _computeNextRunAt(job, startedAt);
       const runEndedAt = Date.now();
 
-      updateCronJob(job.id, {
+      await updateCronJob(job.id, {
         lastRunAt: startedAt,
         nextRunAt,
         lastRunStatus: status,
@@ -344,7 +344,7 @@ async function _runDueCronJobs(params) {
         consecutiveErrors: 0,
       });
 
-      insertCronRun({
+      await insertCronRun({
         jobId: job.id,
         startedAt,
         endedAt: runEndedAt,
@@ -369,7 +369,7 @@ async function _runDueCronJobs(params) {
       const backoffNext = startedAt + errorBackoffMs(nextConsecutiveErrors);
       const nextRunAt = normalNext ? Math.max(normalNext, backoffNext) : backoffNext;
 
-      updateCronJob(job.id, {
+      await updateCronJob(job.id, {
         lastRunAt: startedAt,
         nextRunAt,
         lastRunStatus: 'error',
@@ -378,7 +378,7 @@ async function _runDueCronJobs(params) {
         consecutiveErrors: nextConsecutiveErrors,
       });
 
-      insertCronRun({
+      await insertCronRun({
         jobId: job.id,
         startedAt,
         endedAt: Date.now(),
@@ -466,18 +466,19 @@ async function _createUnattendedAgent({ skill }) {
   });
 }
 
-function _persistEphemeralAgentSession(agent, sessionKey, startedAt) {
+async function _persistEphemeralAgentSession(agent, sessionKey, startedAt) {
   if (!isDbReady()) return;
   const usage = _extractUsage(agent);
   const messages = agent.state?.messages || [];
 
+  const statements = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    dbRun(
-      `INSERT OR IGNORE INTO messages
+    statements.push({
+      sql: `INSERT OR IGNORE INTO messages
        (session_key, sequence, role, content, timestamp, model, tool_call_id, usage_input, usage_output)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
+      params: [
         sessionKey,
         i,
         m.role,
@@ -487,15 +488,15 @@ function _persistEphemeralAgentSession(agent, sessionKey, startedAt) {
         m.toolCallId || null,
         m.usage?.input || null,
         m.usage?.output || null,
-      ]
-    );
+      ],
+    });
   }
 
-  dbRun(
-    `INSERT OR REPLACE INTO sessions
+  statements.push({
+    sql: `INSERT OR REPLACE INTO sessions
      (session_key, agent_id, created_at, updated_at, model, total_tokens, input_tokens, output_tokens)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
+    params: [
       sessionKey,
       'main',
       startedAt,
@@ -504,10 +505,10 @@ function _persistEphemeralAgentSession(agent, sessionKey, startedAt) {
       usage.totalTokens,
       usage.inputTokens,
       usage.outputTokens,
-    ]
-  );
+    ],
+  });
 
-  dbFlush();
+  await dbTransaction(statements);
 }
 
 function _pruneInMemoryMessages(agent, keepCount) {
@@ -567,9 +568,9 @@ function _buildHeartbeatPrompt({ basePrompt, pendingEvents }) {
   return `${basePrompt}\n\nSystem events:\n${lines.join('\n')}`;
 }
 
-function _resolveSkill(skillId) {
+async function _resolveSkill(skillId) {
   if (!skillId) return null;
-  const skills = listCronSkills();
+  const skills = await listCronSkills();
   return skills.find((s) => s.id === skillId) || null;
 }
 
@@ -616,7 +617,7 @@ async function _deliverCronResult(job, text) {
   return true;
 }
 
-export function captureTranscriptState(agentId, sessionKey, openclawRoot = deps?.OPENCLAW_ROOT) {
+export async function captureTranscriptState(agentId, sessionKey, openclawRoot = deps?.OPENCLAW_ROOT) {
   const jsonlPath = openclawRoot
     ? join(openclawRoot, 'agents', agentId, 'sessions', `${sessionKey.replace('/', '_')}.jsonl`)
     : null;
@@ -640,12 +641,12 @@ export function captureTranscriptState(agentId, sessionKey, openclawRoot = deps?
     };
   }
 
-  const maxRow = dbQueryOne('SELECT MAX(sequence) as max_seq FROM messages WHERE session_key = ?', [
+  const maxRow = await dbQueryOne('SELECT MAX(sequence) as max_seq FROM messages WHERE session_key = ?', [
     sessionKey,
   ]);
   const maxMessageSeq = Number.isFinite(maxRow?.max_seq) ? maxRow.max_seq : -1;
 
-  const sessionRow = dbQueryOne('SELECT updated_at FROM sessions WHERE session_key = ?', [sessionKey]);
+  const sessionRow = await dbQueryOne('SELECT updated_at FROM sessions WHERE session_key = ?', [sessionKey]);
 
   return {
     sessionKey,
@@ -657,7 +658,7 @@ export function captureTranscriptState(agentId, sessionKey, openclawRoot = deps?
   };
 }
 
-export function pruneHeartbeatTranscript(state, sessionKey = state?.sessionKey) {
+export async function pruneHeartbeatTranscript(state, sessionKey = state?.sessionKey) {
   if (!state || !sessionKey) return;
 
   if (state.jsonlPath && typeof state.jsonlSize === 'number') {
@@ -674,18 +675,17 @@ export function pruneHeartbeatTranscript(state, sessionKey = state?.sessionKey) 
   }
 
   if (isDbReady()) {
-    dbRun('DELETE FROM messages WHERE session_key = ? AND sequence > ?', [
+    await dbRun('DELETE FROM messages WHERE session_key = ? AND sequence > ?', [
       sessionKey,
       typeof state.maxMessageSeq === 'number' ? state.maxMessageSeq : -1,
     ]);
 
     if (typeof state.sessionUpdatedAt === 'number') {
-      dbRun('UPDATE sessions SET updated_at = ? WHERE session_key = ?', [
+      await dbRun('UPDATE sessions SET updated_at = ? WHERE session_key = ?', [
         state.sessionUpdatedAt,
         sessionKey,
       ]);
     }
-    dbFlush();
   }
 }
 

@@ -10,8 +10,7 @@
     "@mariozechner/pi-ai": "^0.55.1",
     "@sinclair/typebox": "^0.34.41",
     "isomorphic-git": "^1.27.1",
-    "pyodide": "^0.27.5",
-    "sql.js": "^1.14.0"
+    "pyodide": "^0.27.5"
   },
   "engines": {
     "node": ">=20"

@@ -144,7 +144,50 @@ export async function runSentinelE2E() {
     const engine = window.__mobileClaw
     assert('engine.ready', engine.ready, true)
     assert('engine.available', engine.available, true)
+
+    // Listen for DB status from worker
+    let dbStatus = null
+    engine.onMessage('worker.db_status', (msg) => {
+      dbStatus = msg
+    })
+
+    // Wait for DB — use race with timeout since getSchedulerConfig
+    // hangs forever if DB isn't initialized (worker throws w/o response)
+    let dbReady = false
+    for (let i = 0; i < 20; i++) {
+      if (dbStatus) {
+        if (dbStatus.ready) {
+          dbReady = true
+        } else {
+          await postResult('worker DB error', 'fail', dbStatus.error || 'unknown')
+          failed++
+        }
+        break
+      }
+      try {
+        const result = await Promise.race([
+          engine.getSchedulerConfig(),
+          sleep(600).then(() => {
+            throw new Error('timeout')
+          }),
+        ])
+        if (result && !result.error) {
+          dbReady = true
+          break
+        }
+      } catch {
+        // Retry
+      }
+    }
+    assertTruthy('worker DB initialized within 12s', dbReady)
   })
+
+  // Bail out if DB failed — all remaining tests need it
+  if (failed > 0) {
+    console.log('[E2E] DB not initialized — aborting remaining tests')
+    await postDone()
+    return
+  }
 
   // ── 2. MobileCron integration ────────────────────────────────────────
   await section('2. MobileCron Integration', async () => {
