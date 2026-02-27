@@ -6,6 +6,9 @@ node_modules/
 
 # Build output
 dist/
+
+# Generated worker copy (setup:worker copies nodejs-assets → public/)
+**/public/nodejs-project/
 # sql.js ships its WASM binary in dist/ — un-ignore only production files
 !nodejs-assets/nodejs-project/node_modules/sql.js/dist/sql-wasm.js
 !nodejs-assets/nodejs-project/node_modules/sql.js/dist/sql-wasm.wasm

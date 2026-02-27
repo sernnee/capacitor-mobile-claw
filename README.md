@@ -31,38 +31,42 @@ The fastest way to see Mobile Claw in action is the included reference app — a
 ### Run on Android
 
 ```bash
-# Clone the repo
 git clone https://github.com/rogelioRuiz/capacitor-mobile-claw.git
 cd capacitor-mobile-claw
 
-# Install plugin dependencies
+# Install plugin + reference app deps (postinstall auto-copies Node.js worker)
 npm install
-
-# Set up the reference app
 cd examples/reference-app
 npm install
 
-# Build the web app
-npm run build
+# Build web app + sync native project
+npm run cap:build
 
-# Add the Android platform (first time only)
+# First time only — add platform
 npx cap add android
 
-# Sync web assets → native project
-npx cap sync android
-
-# Open in Android Studio — build & run from there
+# Open in Android Studio — build & run
 npx cap open android
 ```
 
 ### Run on iOS
 
 ```bash
+git clone https://github.com/rogelioRuiz/capacitor-mobile-claw.git
+cd capacitor-mobile-claw
+
+npm install
 cd examples/reference-app
+npm install
+
+# Build web app + sync + copy iOS builtin_modules
+npm run cap:build
+
+# First time only — add platform
 npx cap add ios
-npx cap sync ios
+
+# Open in Xcode — build & run
 npx cap open ios
-# Build & run from Xcode
 ```
 
 Once the app launches, enter your Anthropic API key in settings and start chatting. The agent can read/write files, run code, use git, and call any registered MCP device tools — all on-device.
@@ -97,17 +101,33 @@ Once the app launches, enter your Anthropic API key in settings and start chatti
 ## Install in Your Own App
 
 ```bash
-npm install capacitor-mobile-claw
+npm install capacitor-mobile-claw @capacitor/core @capacitor/device @choreruiz/capacitor-node-js
 ```
 
-Peer dependencies:
-```bash
-npm install @capacitor/core @capacitor/device
-# capacitor-nodejs is distributed via GitHub Releases (not npm):
-npm install https://github.com/hampoelz/Capacitor-NodeJS/releases/download/v1.0.0-beta.9/capacitor-nodejs.tgz
-# Optional (for MCP device tools):
-npm install @modelcontextprotocol/sdk
+Then add these scripts to your `package.json`:
+
+```json
+{
+  "scripts": {
+    "setup:worker": "rm -rf public/nodejs-project && cp -R node_modules/capacitor-mobile-claw/nodejs-assets/nodejs-project public/nodejs-project && cd public/nodejs-project && npm install --production",
+    "postinstall": "npm run setup:worker",
+    "cap:sync": "cap sync && cp -R node_modules/@choreruiz/capacitor-node-js/ios/assets/builtin_modules ios/App/App/public/builtin_modules 2>/dev/null; true",
+    "cap:build": "npm run setup:worker && vite build && npm run cap:sync"
+  }
+}
 ```
+
+And add to your `capacitor.config.ts`:
+
+```typescript
+plugins: {
+  CapacitorNodeJS: {
+    nodeDir: 'nodejs-project',
+  },
+}
+```
+
+Add `public/nodejs-project` to your `.gitignore` — it's generated from the npm package.
 
 ### Basic Usage
 
@@ -214,7 +234,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guid
 |-------|-----------|
 | Mobile framework | [Capacitor 8](https://capacitorjs.com/) |
 | Agent core | [Pi](https://www.npmjs.com/package/@mariozechner/pi-ai) by Mario Zechner |
-| Embedded runtime | [Capacitor-NodeJS](https://github.com/hampoelz/Capacitor-NodeJS) |
+| Embedded runtime | [@choreruiz/capacitor-node-js](https://github.com/rogelioRuiz/capacitor-node-js) |
 | Tool protocol | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) |
 | LLM provider | [Anthropic Claude](https://anthropic.com/) |
 | Git | [isomorphic-git](https://isomorphic-git.org/) |

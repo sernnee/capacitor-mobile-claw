@@ -100,7 +100,7 @@ export class MobileClawEngine {
     this._error = null
 
     try {
-      const { NodeJS } = await import('capacitor-nodejs')
+      const { NodeJS } = await import('@choreruiz/capacitor-node-js')
       this.nodePlugin = NodeJS
       this._available = true
 

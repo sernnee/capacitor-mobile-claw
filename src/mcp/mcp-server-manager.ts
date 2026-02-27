@@ -77,7 +77,7 @@ export class McpServerManager {
 
       // Bridge transport: ON by default
       if (options.enableBridge !== false) {
-        const { NodeJS } = await import('capacitor-nodejs')
+        const { NodeJS } = await import('@choreruiz/capacitor-node-js')
         const bridgeTransport = new BridgeServerTransport(NodeJS)
         await this.manager.addTransport('bridge', bridgeTransport)
         console.log('[MCP] Bridge transport active — worker can call device tools')

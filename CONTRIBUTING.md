@@ -62,16 +62,16 @@ Key files:
 
 ```bash
 cd examples/reference-app
-npm install
-npm run build
+npm install              # postinstall auto-copies the Node.js worker
+npm run cap:build        # vite build + cap sync + copies iOS builtin_modules
 
 # Android
-npx cap sync android
-npx cap open android    # Opens in Android Studio
+npx cap add android      # first time only
+npx cap open android     # opens in Android Studio — build & run
 
 # iOS
-npx cap sync ios
-npx cap open ios        # Opens in Xcode
+npx cap add ios          # first time only
+npx cap open ios         # opens in Xcode — build & run
 ```
 
 ## Making Changes
