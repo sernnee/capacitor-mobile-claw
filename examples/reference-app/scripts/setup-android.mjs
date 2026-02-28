@@ -15,6 +15,15 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { execSync } from 'child_process'
 
+if (!process.env.ANDROID_HOME && !process.env.ANDROID_SDK_ROOT) {
+  console.error(
+    '[setup-android] ERROR: ANDROID_HOME is not set.\n\n' +
+      '  export ANDROID_HOME=$HOME/Android/Sdk        # Linux\n' +
+      '  export ANDROID_HOME=$HOME/Library/Android/sdk  # macOS\n',
+  )
+  process.exit(1)
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const ANDROID = join(ROOT, 'android')

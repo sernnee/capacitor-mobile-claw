@@ -3,6 +3,9 @@
   "version": "1.0.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "setup:worker": "rm -rf public/nodejs-project && mkdir -p public && cp -R ../../nodejs-assets/nodejs-project public/nodejs-project && rm -rf public/nodejs-project/node_modules && cd public/nodejs-project && npm install --production",
     "preinstall": "node -e \"const{execSync}=require('child_process'),{existsSync}=require('fs');if(!existsSync('../../dist')){console.log('Building capacitor-mobile-claw...');execSync('npm install --ignore-scripts',{cwd:'../../',stdio:'inherit'});execSync('./node_modules/.bin/tsc',{cwd:'../../',stdio:'inherit'})}\"",
@@ -11,7 +14,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "cap:sync": "cap sync && cp -R node_modules/@choreruiz/capacitor-node-js/ios/assets/builtin_modules ios/App/App/public/builtin_modules 2>/dev/null; true",
-    "cap:build": "npm run setup:worker && vite build && npm run cap:sync",
+    "cap:build": "node -e \"require('fs').existsSync('public/nodejs-project/node_modules')||process.exit(1)\" || npm run setup:worker && vite build && npm run cap:sync",
     "setup:android": "node scripts/setup-android.mjs",
     "setup:ios": "node scripts/setup-ios.mjs",
     "build:android": "npm run cap:build && cd android && ./gradlew assembleDebug",
@@ -45,6 +48,7 @@
     "@vitejs/plugin-vue": "^5.2.0",
     "tailwindcss": "^4.2.0",
     "typescript": "^5.0.0",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "ws": "^8.18.0"
   }
 }

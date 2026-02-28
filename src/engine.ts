@@ -811,7 +811,7 @@ export class MobileClawEngine {
 
   async triggerHeartbeatWake(source = 'manual'): Promise<void> {
     if (this._heartbeatManager) {
-      await this._heartbeatManager.handleWake(source, { force: true })
+      await this._heartbeatManager.handleWake(source, { force: source === 'manual' })
       return
     }
     await this.send({ type: 'heartbeat.wake', source, timestamp: Date.now() })

@@ -24,7 +24,7 @@ The fastest way to see Mobile Claw in action is the included reference app — a
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) >= 20
+- [Node.js](https://nodejs.org/) >= 22
 - [Android Studio](https://developer.android.com/studio) (for Android) or [Xcode](https://developer.apple.com/xcode/) (for iOS)
 - An Anthropic API key or Claude Max subscription
 

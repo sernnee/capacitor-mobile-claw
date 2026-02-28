@@ -898,6 +898,20 @@ export async function runSentinelE2E() {
 
   // ── 23b. Heartbeat HEARTBEAT_OK → suppressed (mocked) ─────────────
   await section('23b. Mocked Heartbeat → HEARTBEAT_OK Suppression', async () => {
+    if (!hasCreds) {
+      for (const label of [
+        'LLM mock was called',
+        'request sent to Anthropic API',
+        'request has model',
+        'request has system prompt',
+        'request has messages',
+        'status == suppressed',
+        'reason == heartbeat_ok',
+        'durationMs > 0',
+      ]) skip(label, 'no API credentials')
+      return
+    }
+
     const engine = window.__mobileClaw
     window.__e2eMockResponse = 'HEARTBEAT_OK'
     window.__e2eMockCalls = []
@@ -924,6 +938,16 @@ export async function runSentinelE2E() {
 
   // ── 23c. Heartbeat non-OK response → notification emitted (mocked) ─
   await section('23c. Mocked Heartbeat → Non-OK Response + Notification', async () => {
+    if (!hasCreds) {
+      for (const label of [
+        'status == ok',
+        'responsePreview includes alert text',
+        'cronNotification emitted',
+        'notification body matches',
+      ]) skip(label, 'no API credentials')
+      return
+    }
+
     const engine = window.__mobileClaw
     window.__e2eMockResponse = 'Alert: disk usage is at 92%'
     window.__e2eMockCalls = []
@@ -945,6 +969,19 @@ export async function runSentinelE2E() {
 
   // ── 23d. Skill-constrained cron job — verify wiring (mocked) ───────
   await section('23d. Mocked Cron Job → Skill Constraints Wiring', async () => {
+    if (!hasCreds) {
+      for (const label of [
+        'heartbeat completed',
+        'LLM was called for cron job',
+        'cron job prompt reached LLM',
+        'skill systemPrompt used',
+        'cronJobStarted emitted',
+        'cronJobCompleted emitted',
+        'cron job status is ok or suppressed',
+      ]) skip(label, 'no API credentials')
+      return
+    }
+
     const engine = window.__mobileClaw
 
     // Create a skill with specific constraints
@@ -1025,6 +1062,16 @@ export async function runSentinelE2E() {
 
   // ── 23e. Dedup — same response twice → second is deduped (mocked) ──
   await section('23e. Mocked Heartbeat → Dedup Detection', async () => {
+    if (!hasCreds) {
+      for (const label of [
+        'first run status == ok',
+        'second run status == deduped',
+        'second run reason == duplicate',
+        'LLM called twice total',
+      ]) skip(label, 'no API credentials')
+      return
+    }
+
     const engine = window.__mobileClaw
     const uniqueText = `Dedup test response ${Date.now()}`
     window.__e2eMockResponse = uniqueText

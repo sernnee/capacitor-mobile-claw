@@ -6,6 +6,15 @@ import { mobileClawVitePlugin } from 'capacitor-mobile-claw/vite-plugin'
 
 export default defineConfig({
   plugins: [mobileClawVitePlugin(), vue(), tailwindcss()],
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      onwarn(warning, warn) {
+        if (warning.message?.includes('externalized for browser compatibility')) return
+        warn(warning)
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

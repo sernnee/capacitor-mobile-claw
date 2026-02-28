@@ -4,7 +4,7 @@ Thanks for your interest in contributing! This guide will help you get set up an
 
 ## Prerequisites
 
-- **Node.js** >= 20
+- **Node.js** >= 22
 - **npm** (comes with Node.js)
 - **Android Studio** and/or **Xcode** (for building the reference app on device)
 - **Git**
