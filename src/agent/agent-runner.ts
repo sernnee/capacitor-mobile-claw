@@ -9,9 +9,18 @@
  * in the WebView.
  */
 
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from '@mariozechner/pi-agent-core'
-import { getModel } from '@mariozechner/pi-ai'
 import type { ToolProxy } from './tool-proxy'
+
+// Types from pi-agent-core — imported as type-only to avoid bundling at import time.
+// The actual modules are loaded lazily via dynamic import() in run()/resume().
+// Re-exported types use `import('...')` syntax so they don't generate runtime imports.
+type Agent = import('@mariozechner/pi-agent-core').Agent
+type AgentEvent = import('@mariozechner/pi-agent-core').AgentEvent
+type AgentMessage = import('@mariozechner/pi-agent-core').AgentMessage
+type AgentTool<
+  TParameters extends import('@sinclair/typebox').TSchema = import('@sinclair/typebox').TSchema,
+  TDetails = any,
+> = import('@mariozechner/pi-agent-core').AgentTool<TParameters, TDetails>
 
 export interface AgentRunnerConfig {
   /** Function to dispatch agent events directly to the engine's listener system */
@@ -85,6 +94,14 @@ export class AgentRunner {
       })
       return
     }
+
+    // Lazy-load pi-ai and pi-agent-core — only pulled into the bundle when
+    // the agent is actually used (keeps the package tree-shakeable for
+    // consumers that don't use useWebViewAgent).
+    const [{ getModel }, { Agent }] = await Promise.all([
+      import('@mariozechner/pi-ai'),
+      import('@mariozechner/pi-agent-core'),
+    ])
 
     const model = (getModel as any)(provider, modelId)
     if (!model) {
@@ -226,7 +243,7 @@ export class AgentRunner {
   }
 
   /** Resume a session by hydrating with saved messages */
-  resume(params: {
+  async resume(params: {
     sessionKey: string
     messages: AgentMessage[]
     systemPrompt: string
@@ -234,9 +251,15 @@ export class AgentRunner {
     model?: string
     provider?: string
     extraTools?: AgentTool<any>[]
-  }): void {
+  }): Promise<void> {
     const provider = params.provider || 'anthropic'
     const modelId = params.model || 'claude-sonnet-4-5'
+
+    const [{ getModel }, { Agent }] = await Promise.all([
+      import('@mariozechner/pi-ai'),
+      import('@mariozechner/pi-agent-core'),
+    ])
+
     const model = (getModel as any)(provider, modelId)
     if (!model) return
 
