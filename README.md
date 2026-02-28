@@ -6,7 +6,7 @@
 
 **On-device AI agent engine for mobile apps** — run Claude directly on your phone with file tools, code execution, git, and extensible MCP tool support.
 
-Mobile Claw is a [Capacitor](https://capacitorjs.com/) plugin that embeds a full AI agent runtime on Android and iOS. Two execution modes: a **WebView agent** for instant cold start (agent loop runs in-process) or a **Node.js worker** for full sandboxed tooling. Both talk directly to the Anthropic API — no cloud relay, no proxy. Includes native Kotlin + Swift plugins for streaming HTTP (CORS bypass), background heartbeat scheduling, cron jobs, and on-device vector memory.
+Mobile Claw is a [Capacitor](https://capacitorjs.com/) plugin that embeds a full AI agent runtime on Android and iOS. Two execution modes: a **WebView agent** for instant cold start (agent loop runs in-process) or a **Node.js worker** for full sandboxed tooling. Both talk directly to the Anthropic API — no cloud relay, no proxy. Includes **on-device vector memory** via [LanceDB](https://www.npmjs.com/package/capacitor-lancedb), **background scheduling** via [MobileCron](https://www.npmjs.com/package/capacitor-mobilecron) (WorkManager / BGTaskScheduler), cron jobs with reusable skills, and native streaming HTTP for WebView CORS bypass.
 
 > Built on [OpenClaw](https://github.com/openclaw/openclaw) and the [Pi framework](https://www.npmjs.com/package/@mariozechner/pi-ai) by [Mario Zechner](https://github.com/badlogic). Pi's philosophy of *"what you leave out matters more than what you put in"* — just 4 core tools and a system prompt under 1,000 tokens — is what makes running a capable AI agent on a phone possible at all.
 
@@ -96,53 +96,22 @@ Once the app launches, enter your Anthropic API key in settings and start chatti
 
 ## How It Works
 
-Mobile Claw supports two agent execution modes:
-
-### WebView Agent (recommended)
-
-The agent loop runs directly in the WebView for instant cold start. LLM API calls go through a native HTTP plugin (OkHttp on Android, URLSession on iOS) that bypasses WebView CORS restrictions and provides true streaming via `ReadableStream`. Worker tools are transparently proxied via the bridge.
+The agent loop runs directly in the WebView for instant cold start — no waiting for Node.js worker boot. LLM API calls are routed through native HTTP (OkHttp / URLSession) to bypass WebView CORS, with full SSE streaming. Worker tools (file I/O, git, code exec) are transparently proxied via the bridge.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Your App (Vue, React, Svelte, vanilla JS)                │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │  MobileClawEngine (useWebViewAgent: true)          │  │
-│  │  ┌──────────────┐  ┌───────────────────────────┐   │  │
-│  │  │ Pi Agent     │  │ HttpStreamPlugin (native) │   │  │
-│  │  │ (in WebView) │  │ - OkHttp (Android)        │   │  │
-│  │  │              │──│ - URLSession (iOS)         │   │  │
-│  │  │              │  │ - CORS bypass              │   │  │
-│  │  │              │  │ - ReadableStream assembly  │   │  │
-│  │  └──────┬───────┘  └───────────────────────────┘   │  │
+│  │  ┌──────────────┐                                  │  │
+│  │  │ Pi Agent     │──── Anthropic API (native HTTP)  │  │
+│  │  │ (in WebView) │                                  │  │
+│  │  └──────┬───────┘                                  │  │
 │  │         │ ToolProxy (bridge IPC)                    │  │
 │  │  ┌──────▼───────────────────────────────────────┐   │  │
 │  │  │  Node.js Worker (file tools, git, code exec) │   │  │
 │  │  └──────────────────────────────────────────────┘   │  │
 │  └────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Worker Agent (legacy)
-
-The full agent loop runs inside the embedded Node.js worker. Higher cold start latency but full isolation.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  Your App                                                 │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  MobileClawEngine                                  │  │
-│  └──────────────────┬─────────────────────────────────┘  │
-│                     │ Bridge Protocol (IPC)                │
-│  ┌──────────────────▼─────────────────────────────────┐  │
-│  │  Node.js Worker (Capacitor-NodeJS)                  │  │
-│  │  ┌──────────────┐  ┌──────────────────────┐        │  │
-│  │  │ Pi Agent     │  │ MCP Server           │        │  │
-│  │  │ (pi-ai)      │  │ - Bridge transport   │        │  │
-│  │  │              │  │ - STOMP transport    │        │  │
-│  │  │              │  │ - Custom tools (BYO) │        │  │
-│  │  └──────┬───────┘  └──────────────────────┘        │  │
-│  │         ▼ Anthropic Messages API                    │  │
-│  └─────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -231,9 +200,32 @@ await engine.init({
 })
 ```
 
-### With Heartbeat Scheduling
+### With On-Device Memory
+
+The agent remembers across sessions using [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) — a Rust-powered vector database running entirely on-device. Memories are stored, deduplicated, and recalled via semantic search. Five built-in tools (`memory_store`, `memory_recall`, `memory_search`, `memory_forget`, `memory_get`) are passed to the agent automatically.
 
 ```typescript
+import { MemoryManager } from 'capacitor-lancedb'
+
+const memory = new MemoryManager({ dbPath: 'files://agent-memory' })
+await memory.init()
+
+const engine = new MobileClawEngine()
+const memoryTools = memory.getTools()
+await engine.init({ tools: memoryTools, useWebViewAgent: true })
+
+// Agent can now store/recall memories across sessions.
+// Auto-recall injects relevant context at turn start.
+// Auto-capture extracts facts from agent responses.
+```
+
+### With Background Scheduling
+
+[capacitor-mobilecron](https://www.npmjs.com/package/capacitor-mobilecron) enables the agent to wake and run in the background via Android WorkManager and iOS BGTaskScheduler. The engine's scheduler manages heartbeats (periodic check-ins) and cron jobs (recurring tasks).
+
+```typescript
+import { MobileCron } from 'capacitor-mobilecron'
+
 const engine = new MobileClawEngine()
 await engine.init({ useWebViewAgent: true, mobileCron: MobileCron })
 
@@ -245,9 +237,6 @@ await engine.setHeartbeat({ enabled: true, everyMs: 1800000 })
 engine.addListener('heartbeatCompleted', (event) => {
   console.log(`Heartbeat: ${event.status} (${event.durationMs}ms)`)
 })
-
-// Manual trigger
-await engine.triggerHeartbeatWake('manual')
 ```
 
 ### With Cron Jobs
@@ -260,7 +249,7 @@ const skill = await engine.addSkill({
   timeoutMs: 60000,
 })
 
-// Schedule a cron job
+// Schedule a recurring cron job
 await engine.addCronJob({
   name: 'morning-briefing',
   enabled: true,
@@ -274,8 +263,10 @@ await engine.addCronJob({
 
 ## Features
 
-- **Two agent modes** — WebView (instant cold start) or Node.js worker (full isolation)
-- **Native streaming HTTP** — OkHttp (Android) + URLSession (iOS) bypass CORS, stream SSE chunks as `ReadableStream`
+- **Instant cold start** — agent loop runs in the WebView, worker tools proxied transparently
+- **On-device vector memory** — store, recall, and search memories via [LanceDB](https://www.npmjs.com/package/capacitor-lancedb) with auto-recall context injection and deduplication
+- **Background scheduling** — heartbeat check-ins and cron jobs via [MobileCron](https://www.npmjs.com/package/capacitor-mobilecron) (Android WorkManager / iOS BGTaskScheduler)
+- **Cron jobs & skills** — recurring agent tasks with reusable skill definitions, run history, and delivery modes
 - **Real-time streaming** — text deltas, tool use, and thinking events
 - **Multi-turn conversations** — session persistence via native SQLite
 - **OAuth PKCE + API key** — sign in with Claude Max or use a direct API key
@@ -285,9 +276,6 @@ await engine.addCronJob({
 - **MCP device tools** — extensible via Model Context Protocol
 - **Tool approval gate** — approve/deny tool executions before they run (120s TTL)
 - **Agent steering** — inject follow-up instructions into a running turn
-- **Background heartbeat** — scheduled agent check-ins via MobileCron + WorkManager
-- **Cron jobs** — recurring agent tasks with skills, schedules, and delivery modes
-- **On-device vector memory** — store/recall/search via LanceDB (capacitor-lancedb)
 - **Vite plugin** — stubs Node.js-only transitive deps for browser bundling
 
 ## API Reference
@@ -365,13 +353,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guid
 | Mobile framework | [Capacitor 8](https://capacitorjs.com/) |
 | Agent core | [Pi](https://www.npmjs.com/package/@mariozechner/pi-ai) by Mario Zechner |
 | Embedded runtime | [@choreruiz/capacitor-node-js](https://github.com/rogelioRuiz/capacitor-node-js) |
-| Native HTTP | OkHttp (Android) + URLSession (iOS) — streaming, CORS bypass |
 | Tool protocol | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) |
 | LLM provider | [Anthropic Claude](https://anthropic.com/) |
-| Vector memory | [LanceDB](https://lancedb.com/) via [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) |
+| Vector memory | [LanceDB](https://lancedb.com/) via [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) (Rust FFI, on-device) |
 | Background scheduling | [capacitor-mobilecron](https://www.npmjs.com/package/capacitor-mobilecron) (WorkManager / BGTaskScheduler) |
 | Git | [isomorphic-git](https://isomorphic-git.org/) |
-| Database | [@capacitor-community/sqlite](https://github.com/nicepkg/capacitor-community-sqlite) (native SQLite via JSON-RPC bridge) |
+| Database | [@capacitor-community/sqlite](https://github.com/nicepkg/capacitor-community-sqlite) (native SQLite) |
 | Python | [Pyodide](https://pyodide.org/) (CPython via WebAssembly) |
 | Type system | TypeScript (strict mode) |
 | Lint | [Biome](https://biomejs.dev/) |
