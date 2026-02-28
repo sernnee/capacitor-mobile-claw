@@ -50,6 +50,8 @@ export interface AgentRunParams {
   provider?: string
   apiKey: string
   systemPrompt: string
+  maxTurns?: number
+  allowedTools?: string[]
   /** Additional tools (MCP device tools) to merge with proxied worker tools */
   extraTools?: AgentTool<any>[]
 }
@@ -115,7 +117,10 @@ export class AgentRunner {
     // Build tools: proxied worker tools + optional MCP/memory tools
     const workerTools = this._wrapWithPreExecuteHook(this.toolProxy.buildTools())
     const extraTools = params.extraTools ? this._wrapWithPreExecuteHook(params.extraTools) : []
-    const tools = [...workerTools, ...extraTools]
+    let tools = [...workerTools, ...extraTools]
+    if (params.allowedTools?.length) {
+      tools = tools.filter((tool) => params.allowedTools?.includes(tool.name))
+    }
 
     this.agent = new Agent({
       initialState: {
@@ -132,7 +137,14 @@ export class AgentRunner {
     this.currentSessionKey = params.sessionKey
 
     // Subscribe to events — dispatch DIRECTLY to the engine (no bridge hop)
+    let turnCount = 0
     this.agent.subscribe((event: AgentEvent) => {
+      if (event.type === 'turn_end' && params.maxTurns) {
+        turnCount += 1
+        if (turnCount >= params.maxTurns) {
+          this.agent?.abort()
+        }
+      }
       this._dispatchAgentEvent(event)
     })
 

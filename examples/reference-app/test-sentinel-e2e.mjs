@@ -783,6 +783,234 @@ await section('22. Memory Config', async () => {
   ok('autoCapture toggle succeeded');
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// HEARTBEAT AGENT WIRING — MOCKED LLM (section 23)
+// Tests the full path: trigger → HeartbeatManager → AgentRunner → Agent
+// → tool wiring → fetch(Anthropic API) — intercepted with mock SSE.
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── 23a. Install LLM mock interceptor ─────────────────────────────────────
+await section('23a. Install LLM Mock Interceptor', async () => {
+  await evaluate(`window.__mobileClaw.setSchedulerConfig({ enabled: true })`);
+  await evaluate(`window.__mobileClaw.setHeartbeat({ enabled: true, everyMs: 1800000 })`);
+
+  // Inject the buildMockSSE helper + fetch interceptor into the WebView
+  await evaluate(`
+    window.__e2eBuildMockSSE = function(responseText, model) {
+      return [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"msg_e2e_' + Date.now() + '","type":"message","role":"assistant","content":[],"model":"' + (model || 'claude-sonnet-4-5-20250514') + '","usage":{"input_tokens":10,"output_tokens":0}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"' + responseText.replace(/"/g, '\\\\"') + '"}}',
+        '',
+        'event: content_block_stop',
+        'data: {"type":"content_block_stop","index":0}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+      ].join('\\n');
+    };
+
+    window.__e2eOriginalFetch = window.fetch;
+    window.__e2eMockCalls = [];
+    window.__e2eMockResponse = 'HEARTBEAT_OK';
+
+    window.fetch = async function(url, opts) {
+      if (typeof url === 'string' && url.includes('api.anthropic.com/v1/messages')) {
+        var body = opts && opts.body ? JSON.parse(opts.body) : null;
+        window.__e2eMockCalls.push({
+          url: url,
+          method: opts && opts.method,
+          model: body && body.model,
+          system: body && body.system,
+          messages: body && body.messages,
+          tools: body && body.tools ? body.tools.map(function(t) { return t.name; }) : null,
+          max_tokens: body && body.max_tokens,
+          ts: Date.now(),
+        });
+
+        var responseText = window.__e2eMockResponse || 'HEARTBEAT_OK';
+        var sse = window.__e2eBuildMockSSE(responseText, body && body.model);
+        var encoder = new TextEncoder();
+        var stream = new ReadableStream({
+          start: function(controller) {
+            controller.enqueue(encoder.encode(sse));
+            controller.close();
+          }
+        });
+
+        return new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      return window.__e2eOriginalFetch(url, opts);
+    };
+  `);
+
+  const installed = await evalJSON('window.fetch !== window.__e2eOriginalFetch');
+  assertTruthy('LLM mock interceptor installed', installed);
+  ok('mock interceptor ready');
+});
+
+// ── 23b. Heartbeat HEARTBEAT_OK → suppressed (mocked) ────────────────────
+await section('23b. Mocked Heartbeat → HEARTBEAT_OK Suppression', async () => {
+  await evaluate(`window.__e2eMockResponse = 'HEARTBEAT_OK'`);
+  await evaluate(`window.__e2eMockCalls = []`);
+  await clearEvents();
+  await setupEventCapture();
+
+  await evaluate(`window.__mobileClaw.triggerHeartbeatWake('manual')`);
+  const completed = await waitForEvent('heartbeatCompleted', 30000);
+
+  // Verify the LLM was actually called
+  const mockCallCount = await evalJSON('window.__e2eMockCalls.length');
+  assertTruthy('LLM mock was called', mockCallCount >= 1);
+
+  const call = await evalJSON('window.__e2eMockCalls[0]');
+  assertTruthy('request sent to Anthropic API', call?.url?.includes('api.anthropic.com'));
+  assertTruthy('request has model', !!call?.model);
+  assertTruthy('request has system prompt', typeof call?.system === 'string' || Array.isArray(call?.system));
+  assertTruthy('request has messages', Array.isArray(call?.messages) && call?.messages.length > 0);
+
+  assert('status == suppressed', completed?.status, 'suppressed');
+  assert('reason == heartbeat_ok', completed?.reason, 'heartbeat_ok');
+  assertTruthy('durationMs > 0', (completed?.durationMs ?? 0) > 0);
+});
+
+// ── 23c. Heartbeat non-OK response → notification emitted (mocked) ────────
+await section('23c. Mocked Heartbeat → Non-OK Response + Notification', async () => {
+  await evaluate(`window.__e2eMockResponse = 'Alert: disk usage is at 92%'`);
+  await evaluate(`window.__e2eMockCalls = []`);
+  await clearEvents();
+  await setupEventCapture();
+
+  await evaluate(`window.__mobileClaw.triggerHeartbeatWake('manual')`);
+  const completed = await waitForEvent('heartbeatCompleted', 30000);
+
+  assert('status == ok', completed?.status, 'ok');
+  assertTruthy('responsePreview includes alert text', (completed?.responsePreview || '').includes('disk usage'));
+
+  const events = await getEvents();
+  const notification = events.find(e => e.__type === 'cronNotification');
+  assertTruthy('cronNotification emitted', !!notification);
+  assertTruthy('notification body matches', notification?.body?.includes('disk usage'));
+});
+
+// ── 23d. Skill-constrained cron job — verify wiring (mocked) ──────────────
+await section('23d. Mocked Cron Job → Skill Constraints Wiring', async () => {
+  const skill = await evalJSON(`await window.__mobileClaw.addSkill({
+    name: 'e2e-mock-skill',
+    allowedTools: ['Read'],
+    systemPrompt: 'You are a disk monitor. Only read files.',
+    model: 'claude-sonnet-4-5',
+    maxTurns: 1,
+    timeoutMs: 30000
+  })`);
+
+  const job = await evalJSON(`await window.__mobileClaw.addCronJob({
+    name: 'e2e-mock-constrained-job',
+    enabled: true,
+    sessionTarget: 'isolated',
+    schedule: { kind: 'every', everyMs: 60000 },
+    skillId: '${skill.id}',
+    prompt: 'Check /var/log for errors',
+    deliveryMode: 'notification'
+  })`);
+
+  await evaluate(`window.__e2eMockResponse = 'No errors found in logs'`);
+  await evaluate(`window.__e2eMockCalls = []`);
+  await clearEvents();
+  await setupEventCapture();
+
+  await evaluate(`window.__mobileClaw.runCronJob('${job.id}')`);
+  const completed = await waitForEvent('heartbeatCompleted', 30000);
+  assertTruthy('heartbeat completed', !!completed);
+
+  const mockCallCount = await evalJSON('window.__e2eMockCalls.length');
+  assertTruthy('LLM was called for cron job', mockCallCount >= 1);
+
+  // Find the call that contains our cron job prompt
+  const cronCall = await evalJSON(`
+    window.__e2eMockCalls.find(function(c) {
+      return c.messages && c.messages.some(function(m) {
+        if (typeof m.content === 'string') return m.content.includes('Check /var/log');
+        if (Array.isArray(m.content)) return m.content.some(function(p) { return p && p.text && p.text.includes('Check /var/log'); });
+        return false;
+      });
+    })
+  `);
+  assertTruthy('cron job prompt reached LLM', !!cronCall);
+
+  if (cronCall) {
+    const sysPrompt = typeof cronCall.system === 'string'
+      ? cronCall.system
+      : (Array.isArray(cronCall.system) ? cronCall.system.map(s => s.text).join(' ') : '');
+    assertTruthy('skill systemPrompt used', sysPrompt?.includes('disk monitor'));
+
+    if (cronCall.tools) {
+      assertTruthy('tools filtered — Read present', cronCall.tools.includes('Read'));
+      assertTruthy(`tools filtered — got ${cronCall.tools.length} tool(s)`, cronCall.tools.length <= 3);
+    }
+  }
+
+  const events = await getEvents();
+  const jobStarted = events.find(e => e.__type === 'cronJobStarted' && e.jobId === job.id);
+  const jobCompleted = events.find(e => e.__type === 'cronJobCompleted' && e.jobId === job.id);
+  assertTruthy('cronJobStarted emitted', !!jobStarted);
+  assertTruthy('cronJobCompleted emitted', !!jobCompleted);
+
+  await evaluate(`window.__mobileClaw.removeCronJob('${job.id}')`);
+  await evaluate(`window.__mobileClaw.removeSkill('${skill.id}')`);
+});
+
+// ── 23e. Dedup — same response twice → second is deduped (mocked) ─────────
+await section('23e. Mocked Heartbeat → Dedup Detection', async () => {
+  const uniqueText = `Dedup test response ${Date.now()}`;
+  await evaluate(`window.__e2eMockResponse = ${JSON.stringify(uniqueText)}`);
+  await evaluate(`window.__e2eMockCalls = []`);
+
+  // First run — new response → status 'ok'
+  await clearEvents();
+  await setupEventCapture();
+  await evaluate(`window.__mobileClaw.triggerHeartbeatWake('manual')`);
+  const first = await waitForEvent('heartbeatCompleted', 30000);
+  assert('first run status == ok', first?.status, 'ok');
+
+  // Second run — same text → deduped
+  await evaluate(`window.__e2eMockCalls = []`);
+  await clearEvents();
+  await setupEventCapture();
+  await evaluate(`window.__mobileClaw.triggerHeartbeatWake('manual')`);
+  const second = await waitForEvent('heartbeatCompleted', 30000);
+  assert('second run status == deduped', second?.status, 'deduped');
+  assert('second run reason == duplicate', second?.reason, 'duplicate');
+
+  const callCount = await evalJSON('window.__e2eMockCalls.length');
+  assertTruthy('LLM called for dedup run', callCount >= 1);
+});
+
+// ── 23f. Restore original fetch ───────────────────────────────────────────
+await section('23f. Restore Fetch Mock', async () => {
+  await evaluate(`
+    if (window.__e2eOriginalFetch) {
+      window.fetch = window.__e2eOriginalFetch;
+      delete window.__e2eOriginalFetch;
+    }
+    delete window.__e2eMockCalls;
+    delete window.__e2eMockResponse;
+    delete window.__e2eBuildMockSSE;
+  `);
+  ok('fetch mock removed, original fetch restored');
+});
+
 // ── Cleanup ───────────────────────────────────────────────────────────────
 await section('Cleanup', async () => {
   await evaluate(`window.__mobileClaw.setSchedulerConfig({ enabled: false })`);

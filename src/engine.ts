@@ -13,6 +13,8 @@
 
 import { Capacitor } from '@capacitor/core'
 import { AgentRunner, type PreExecuteResult } from './agent/agent-runner'
+import { CronDbAccess } from './agent/cron-db-access'
+import { HeartbeatManager } from './agent/heartbeat-manager'
 import { SessionStore } from './agent/session-store'
 import { ToolProxy } from './agent/tool-proxy'
 import type {
@@ -38,6 +40,8 @@ import { McpServerManager, type McpServerOptions } from './mcp/mcp-server-manage
 import { DbBridgeHandler } from './services/db-bridge-handler'
 
 type MessageHandler = (msg: any) => void
+type AgentTool = import('@mariozechner/pi-agent-core').AgentTool<any>
+const HEARTBEAT_BRIDGE_TIMEOUT_MS = 10_000
 
 export class MobileClawEngine {
   // ── State ──────────────────────────────────────────────────────────────
@@ -64,6 +68,9 @@ export class MobileClawEngine {
   private _agentRunner: AgentRunner | null = null
   private _toolProxy: ToolProxy | null = null
   private _sessionStore: SessionStore | null = null
+  private _cronDb: CronDbAccess | null = null
+  private _heartbeatManager: HeartbeatManager | null = null
+  private _extraAgentTools: AgentTool[] = []
   private _webViewFetchProxyInstalled = false
   /** Pending pre-execute resolvers keyed by toolCallId */
   private _preExecuteResolvers = new Map<string, (result: PreExecuteResult) => void>()
@@ -169,6 +176,7 @@ export class MobileClawEngine {
       if (this._useWebViewAgent) {
         await this._installWebViewFetchProxy()
         this._toolProxy = new ToolProxy()
+        this._extraAgentTools = this._buildExtraAgentTools(options.tools)
         // Set up bridge send function — nodePlugin.send is available immediately
         this._toolProxy.setBridge((msg) => this.send(msg))
 
@@ -203,6 +211,27 @@ export class MobileClawEngine {
             .catch((err: any) => {
               console.warn('[MobileClaw] Session save failed:', err?.message)
             })
+        })
+
+        this._cronDb = new CronDbAccess()
+        this._heartbeatManager = new HeartbeatManager({
+          dispatch: (msg) => this._dispatch(msg),
+          toolProxy: this._toolProxy,
+          cronDb: this._cronDb,
+          getAuth: (provider, agentId) =>
+            this._waitForMessageWithTimeout('auth.getToken.result', HEARTBEAT_BRIDGE_TIMEOUT_MS, {
+              type: 'auth.getToken',
+              provider,
+              agentId,
+            }),
+          getSystemPrompt: (agentId) =>
+            this._waitForMessageWithTimeout('system_prompt.get.result', HEARTBEAT_BRIDGE_TIMEOUT_MS, {
+              type: 'system_prompt.get',
+              agentId,
+            }),
+          isUserAgentRunning: () => this._agentRunner?.isRunning ?? false,
+          getCurrentSessionKey: () => this._currentSessionKey,
+          extraTools: this._extraAgentTools,
         })
       }
 
@@ -317,30 +346,48 @@ export class MobileClawEngine {
     }
 
     MobileCron.addListener('jobDue', (event: any) => {
-      this.send({
-        type: 'heartbeat.wake',
-        source: event?.source || 'mobilecron',
-        timestamp: event?.firedAt ?? Date.now(),
-      }).catch(() => {})
+      if (this._heartbeatManager) {
+        this._heartbeatManager.handleWake(event?.source || 'mobilecron').catch((err) => {
+          console.warn('[MobileClaw] Heartbeat wake failed:', err?.message)
+        })
+      } else {
+        this.send({
+          type: 'heartbeat.wake',
+          source: event?.source || 'mobilecron',
+          timestamp: event?.firedAt ?? Date.now(),
+        }).catch(() => {})
+      }
     })
 
     // Android WorkManager fires 'nativeWake' (not 'jobDue') for background wakes.
     // The native CronWorker IS the sentinel timer on Android — relay it as heartbeat.wake.
     MobileCron.addListener('nativeWake', (event: any) => {
-      this.send({
-        type: 'heartbeat.wake',
-        source: event?.source || 'workmanager',
-        timestamp: Date.now(),
-      }).catch(() => {})
+      if (this._heartbeatManager) {
+        this._heartbeatManager.handleWake(event?.source || 'workmanager').catch((err) => {
+          console.warn('[MobileClaw] Native wake failed:', err?.message)
+        })
+      } else {
+        this.send({
+          type: 'heartbeat.wake',
+          source: event?.source || 'workmanager',
+          timestamp: Date.now(),
+        }).catch(() => {})
+      }
     })
 
     MobileCron.addListener('overdueJobs', (event: any) => {
       this._dispatch({ type: 'scheduler.overdue', ...event })
-      this.send({
-        type: 'heartbeat.wake',
-        source: 'foreground',
-        timestamp: Date.now(),
-      }).catch(() => {})
+      if (this._heartbeatManager) {
+        this._heartbeatManager.handleWake('foreground').catch((err) => {
+          console.warn('[MobileClaw] Foreground catch-up wake failed:', err?.message)
+        })
+      } else {
+        this.send({
+          type: 'heartbeat.wake',
+          source: 'foreground',
+          timestamp: Date.now(),
+        }).catch(() => {})
+      }
     })
 
     this._onMessage('scheduler.status', (msg) => {
@@ -369,6 +416,45 @@ export class MobileClawEngine {
       if (request) {
         this.send(request).catch((err) => {
           console.warn(`[MobileClaw] send failed for ${type}:`, err)
+        })
+      }
+    })
+  }
+
+  private async _waitForMessageWithTimeout<T>(
+    type: string,
+    timeoutMs: number,
+    request?: Record<string, unknown>,
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let unsub = () => {}
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        unsub()
+        reject(new Error(`Timed out waiting for ${type}`))
+      }, timeoutMs)
+
+      const finish = (fn: () => void) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        unsub()
+        fn()
+      }
+
+      unsub = this._onMessage(
+        type,
+        (msg) => {
+          finish(() => resolve(msg as T))
+        },
+        { once: true },
+      )
+
+      if (request) {
+        this.send(request).catch((err) => {
+          finish(() => reject(err instanceof Error ? err : new Error(String(err))))
         })
       }
     })
@@ -506,10 +592,36 @@ export class MobileClawEngine {
         provider,
         apiKey: authResult.apiKey,
         systemPrompt: promptResult.systemPrompt,
+        extraTools: this._extraAgentTools,
       })
     } catch (err: any) {
       this._dispatch({ type: 'agent.error', error: err.message || 'WebView agent failed' })
     }
+  }
+
+  private _buildExtraAgentTools(tools: MobileClawInitOptions['tools'] = []): AgentTool[] {
+    return (tools || []).map((tool) => ({
+      name: tool.name,
+      label: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema as any,
+      execute: async (_toolCallId: string, args: Record<string, unknown>) => {
+        try {
+          const result = await tool.execute(args)
+          const text = typeof result === 'string' ? result : JSON.stringify(result)
+          return {
+            content: [{ type: 'text' as const, text }],
+            details: result,
+          }
+        } catch (err: any) {
+          const message = err?.message || `Error executing ${tool.name}`
+          return {
+            content: [{ type: 'text' as const, text: `Error executing ${tool.name}: ${message}` }],
+            details: { error: message },
+          }
+        }
+      },
+    }))
   }
 
   private async _installWebViewFetchProxy(): Promise<void> {
@@ -687,6 +799,10 @@ export class MobileClawEngine {
   }
 
   async triggerHeartbeatWake(source = 'manual'): Promise<void> {
+    if (this._heartbeatManager) {
+      await this._heartbeatManager.handleWake(source, { force: true })
+      return
+    }
     await this.send({ type: 'heartbeat.wake', source, timestamp: Date.now() })
   }
 
@@ -731,6 +847,10 @@ export class MobileClawEngine {
   }
 
   async runCronJob(id: string): Promise<void> {
+    if (this._heartbeatManager) {
+      await this._heartbeatManager.handleWake('manual', { force: true, forceJobId: id })
+      return
+    }
     const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.job.run.result', {
       type: 'cron.job.run',
       id,

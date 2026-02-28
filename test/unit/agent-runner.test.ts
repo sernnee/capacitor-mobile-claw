@@ -11,10 +11,19 @@ class MockAgent {
     model: null as any,
     tools: [] as any[],
   }
+  abortCount = 0
 
   private _subscriber: ((event: any) => void) | null = null
   private _idle = true
   private _idleResolvers: (() => void)[] = []
+
+  constructor(config?: any) {
+    if (config?.initialState) {
+      this.state.systemPrompt = config.initialState.systemPrompt
+      this.state.model = config.initialState.model
+      this.state.tools = [...(config.initialState.tools || [])]
+    }
+  }
 
   subscribe(fn: (event: any) => void) {
     this._subscriber = fn
@@ -53,6 +62,8 @@ class MockAgent {
       timestamp: Date.now(),
     })
 
+    this._subscriber?.({ type: 'turn_end' })
+
     this._idle = true
     this.state.isStreaming = false
     for (const r of this._idleResolvers) r()
@@ -67,6 +78,7 @@ class MockAgent {
   }
 
   abort() {
+    this.abortCount += 1
     this._idle = true
     this.state.isStreaming = false
     for (const r of this._idleResolvers) r()
@@ -90,7 +102,7 @@ vi.mock('@mariozechner/pi-ai', () => ({
 
 // Mock Agent constructor to use our MockAgent
 vi.mock('@mariozechner/pi-agent-core', () => ({
-  Agent: vi.fn().mockImplementation(() => new MockAgent()),
+  Agent: vi.fn().mockImplementation((config) => new MockAgent(config)),
 }))
 
 describe('AgentRunner', () => {
@@ -218,6 +230,44 @@ describe('AgentRunner', () => {
       // Should complete successfully (default model used)
       const completed = dispatched.find((m) => m.type === 'agent.completed')
       expect(completed).toBeDefined()
+    })
+
+    it('should filter tools when allowedTools is provided', async () => {
+      await runner.run({
+        prompt: 'Hello',
+        agentId: 'main',
+        sessionKey: 'sess-tools',
+        apiKey: 'sk-test',
+        systemPrompt: 'Test',
+        allowedTools: ['read_file', 'device_ping'],
+        extraTools: [
+          {
+            name: 'device_ping',
+            label: 'device_ping',
+            description: 'Ping a device',
+            parameters: { type: 'object', properties: {} } as any,
+            execute: async () => ({ content: [{ type: 'text' as const, text: 'pong' }], details: { ok: true } }),
+          },
+        ],
+      })
+
+      const toolNames = ((runner.currentAgent as any)?.state.tools || []).map((tool: any) => tool.name)
+      expect(toolNames).toContain('read_file')
+      expect(toolNames).toContain('device_ping')
+      expect(toolNames).not.toContain('write_file')
+    })
+
+    it('should abort after the configured maxTurns threshold', async () => {
+      await runner.run({
+        prompt: 'Hello',
+        agentId: 'main',
+        sessionKey: 'sess-max-turns',
+        apiKey: 'sk-test',
+        systemPrompt: 'Test',
+        maxTurns: 1,
+      })
+
+      expect((runner.currentAgent as any)?.abortCount).toBeGreaterThanOrEqual(1)
     })
   })
 
