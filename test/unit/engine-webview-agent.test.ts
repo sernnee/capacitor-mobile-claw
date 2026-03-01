@@ -161,7 +161,7 @@ describe('Engine WebView Agent Integration', () => {
       })
 
       // Get wrapped tools
-      const tools = runner._wrapWithPreExecuteHook(toolProxy.buildTools())
+      const tools = (runner as any)._wrapTools(toolProxy.buildTools())
       const readFile = tools.find((t) => t.name === 'read_file')!
 
       // Execute — hook denies immediately
@@ -186,7 +186,7 @@ describe('Engine WebView Agent Integration', () => {
         },
       })
 
-      const tools = runner._wrapWithPreExecuteHook(toolProxy.buildTools())
+      const tools = (runner as any)._wrapTools(toolProxy.buildTools())
       const readFile = tools.find((t) => t.name === 'read_file')!
 
       // Execute — hook approves, tool proxy sends to worker

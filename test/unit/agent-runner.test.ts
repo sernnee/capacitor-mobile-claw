@@ -350,7 +350,7 @@ describe('AgentRunner', () => {
       })
 
       // Build tools via proxy to verify they get wrapped
-      const tools = runnerWithHook._wrapWithPreExecuteHook(toolProxy.buildTools())
+      const tools = (runnerWithHook as any)._wrapTools(toolProxy.buildTools())
       expect(tools.length).toBe(14)
 
       // Simulate calling a tool through the hook
@@ -371,7 +371,7 @@ describe('AgentRunner', () => {
         }),
       })
 
-      const tools = runnerWithHook._wrapWithPreExecuteHook(toolProxy.buildTools())
+      const tools = (runnerWithHook as any)._wrapTools(toolProxy.buildTools())
       const readFile = tools.find((t) => t.name === 'read_file')!
 
       // Execute with the hook wrapper — the actual tool.execute won't be called

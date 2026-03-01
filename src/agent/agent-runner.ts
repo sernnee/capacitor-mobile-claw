@@ -7,8 +7,16 @@
  * Tools that need Node.js (file I/O, git, VM) are proxied to the worker via
  * ToolProxy. MCP device tools and session persistence are handled directly
  * in the WebView.
+ *
+ * Tool policy is consumer-owned. Consumers can supply a generic tool
+ * middleware to wrap tool execution, or use the legacy pre-execute hook
+ * for simple approval gates.
+ *
+ * Retry logic remains built in for transient API errors.
  */
 
+import type { ToolMiddleware } from '../definitions'
+import { withRetry } from './retry-logic'
 import type { ToolProxy } from './tool-proxy'
 
 // Types from pi-agent-core — imported as type-only to avoid bundling at import time.
@@ -27,6 +35,8 @@ export interface AgentRunnerConfig {
   dispatch: (msg: Record<string, unknown>) => void
   /** Tool proxy for bridging tool calls to the worker */
   toolProxy: ToolProxy
+  /** Optional middleware that wraps tool execution. */
+  toolMiddleware?: ToolMiddleware
   /** Pre-execute hook — fires before each tool call, returns approved/denied result */
   preExecuteHook?: (
     toolCallId: string,
@@ -61,11 +71,13 @@ export class AgentRunner {
   private currentSessionKey: string | null = null
   private dispatch: (msg: Record<string, unknown>) => void
   private toolProxy: ToolProxy
+  private toolMiddleware?: ToolMiddleware
   private preExecuteHook?: AgentRunnerConfig['preExecuteHook']
 
   constructor(config: AgentRunnerConfig) {
     this.dispatch = config.dispatch
     this.toolProxy = config.toolProxy
+    this.toolMiddleware = config.toolMiddleware
     this.preExecuteHook = config.preExecuteHook
   }
 
@@ -115,8 +127,8 @@ export class AgentRunner {
     }
 
     // Build tools: proxied worker tools + optional MCP/memory tools
-    const workerTools = this._wrapWithPreExecuteHook(this.toolProxy.buildTools())
-    const extraTools = params.extraTools ? this._wrapWithPreExecuteHook(params.extraTools) : []
+    const workerTools = this._wrapTools(this.toolProxy.buildTools())
+    const extraTools = params.extraTools ? this._wrapTools(params.extraTools) : []
     let tools = [...workerTools, ...extraTools]
     if (params.allowedTools?.length) {
       tools = tools.filter((tool) => params.allowedTools?.includes(tool.name))
@@ -155,11 +167,23 @@ export class AgentRunner {
       data: { text: params.prompt, sessionKey: params.sessionKey },
     })
 
-    // Run the agent loop
+    // Run the agent loop with retry logic for transient errors
     const startTime = Date.now()
     try {
-      await this.agent.prompt(params.prompt)
-      await this.agent.waitForIdle()
+      await withRetry(
+        async () => {
+          await this.agent?.prompt(params.prompt)
+          await this.agent?.waitForIdle()
+        },
+        { maxRetries: 2, baseDelayMs: 2000 },
+        (attempt, delayMs) => {
+          this.dispatch({
+            type: 'agent.event',
+            eventType: 'retry',
+            data: { attempt, delayMs, sessionKey: params.sessionKey },
+          })
+        },
+      )
 
       const usage = this._extractUsage()
       this.dispatch({
@@ -211,8 +235,20 @@ export class AgentRunner {
 
     const startTime = Date.now()
     try {
-      await this.agent.prompt(prompt)
-      await this.agent.waitForIdle()
+      await withRetry(
+        async () => {
+          await this.agent?.prompt(prompt)
+          await this.agent?.waitForIdle()
+        },
+        { maxRetries: 2, baseDelayMs: 2000 },
+        (attempt, delayMs) => {
+          this.dispatch({
+            type: 'agent.event',
+            eventType: 'retry',
+            data: { attempt, delayMs, sessionKey: this.currentSessionKey },
+          })
+        },
+      )
 
       const usage = this._extractUsage()
       this.dispatch({
@@ -275,8 +311,8 @@ export class AgentRunner {
     const model = (getModel as any)(provider, modelId)
     if (!model) return
 
-    const workerTools = this._wrapWithPreExecuteHook(this.toolProxy.buildTools())
-    const extraTools = params.extraTools ? this._wrapWithPreExecuteHook(params.extraTools) : []
+    const workerTools = this._wrapTools(this.toolProxy.buildTools())
+    const extraTools = params.extraTools ? this._wrapTools(params.extraTools) : []
     const tools = [...workerTools, ...extraTools]
 
     this.agent = new Agent({
@@ -286,8 +322,8 @@ export class AgentRunner {
         tools,
         thinkingLevel: 'off',
       },
-      convertToLlm: (messages) =>
-        messages.filter((m: any) => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'),
+      convertToLlm: (msgs) =>
+        msgs.filter((m: any) => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'),
       getApiKey: () => params.apiKey,
     })
 
@@ -339,16 +375,39 @@ export class AgentRunner {
     }
   }
 
-  /** Wrap tools with the pre-execute hook (approval gate) */
-  private _wrapWithPreExecuteHook(tools: AgentTool<any>[]): AgentTool<any>[] {
-    if (!this.preExecuteHook) return tools
+  /**
+   * Wrap tools with optional consumer middleware or the legacy pre-execute hook.
+   */
+  private _wrapTools(tools: AgentTool<any>[]): AgentTool<any>[] {
+    const middleware = this.toolMiddleware
     const hook = this.preExecuteHook
+    if (!middleware && !hook) {
+      return tools
+    }
+
     return tools.map((tool) => ({
       ...tool,
       execute: async (toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: any) => {
-        // Fire pre-execute hook directly in WebView — instant UI, no bridge hop
-        const result = await hook(toolCallId, tool.name, params, signal)
+        const execute = (nextArgs?: Record<string, unknown>) =>
+          tool.execute(toolCallId, nextArgs ?? params, signal, onUpdate)
 
+        if (middleware) {
+          return middleware(
+            {
+              name: tool.name,
+              toolCallId,
+              args: params,
+            },
+            execute,
+            signal,
+          )
+        }
+
+        if (!hook) {
+          return execute()
+        }
+
+        const result = await hook(toolCallId, tool.name, params, signal)
         if (result.deny) {
           return {
             content: [
@@ -358,8 +417,7 @@ export class AgentRunner {
           }
         }
 
-        // Execute with (possibly transformed) args
-        return tool.execute(toolCallId, result.args, signal, onUpdate)
+        return execute(result.args)
       },
     }))
   }

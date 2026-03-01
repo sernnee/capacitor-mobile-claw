@@ -6,7 +6,7 @@
  * execution, git integration, and 64+ MCP device tools.
  *
  * Tool approval policy is NOT handled by this plugin — the consumer
- * controls policy via the pre-execution hook (tool.pre_execute events).
+ * controls policy via tool middleware or the legacy pre-execution hook.
  *
  * Usage:
  *   import { MobileClaw } from 'capacitor-mobile-claw'
@@ -179,6 +179,18 @@ export interface MobileClawPlugin {
 
 import type { DeviceTool } from './mcp/tools/types'
 
+export interface ToolMiddlewareContext {
+  name: string
+  toolCallId: string
+  args: Record<string, unknown>
+}
+
+export type ToolMiddleware = (
+  tool: ToolMiddlewareContext,
+  execute: (args?: Record<string, unknown>) => Promise<any>,
+  signal?: AbortSignal,
+) => Promise<any>
+
 export interface MobileClawInitOptions {
   /** Enable bridge MCP transport (in-process device tools). Default: true. */
   enableBridge?: boolean
@@ -199,6 +211,11 @@ export interface MobileClawInitOptions {
    * Default: false (use worker-based agent).
    */
   useWebViewAgent?: boolean
+  /**
+   * Optional middleware that wraps tool execution end-to-end.
+   * When provided, this owns approval, auditing, and any policy checks.
+   */
+  toolMiddleware?: ToolMiddleware
 }
 
 export interface StompConfig {

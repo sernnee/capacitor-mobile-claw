@@ -137,7 +137,7 @@ export class MobileClawWeb extends WebPlugin implements MobileClawPlugin {
   }
 
   async resumeSession(options: { sessionKey: string; agentId?: string }): Promise<void> {
-    return this.engine.resumeSession(options.sessionKey, options.agentId)
+    await this.engine.resumeSession(options.sessionKey, options.agentId)
   }
 
   async clearConversation(): Promise<{ success: boolean }> {

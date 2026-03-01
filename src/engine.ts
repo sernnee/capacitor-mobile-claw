@@ -5,8 +5,8 @@
  * It manages the embedded Node.js worker, bridge communication,
  * MCP server lifecycle, and exposes all plugin API methods.
  *
- * Tool approval policy is NOT handled here — the consumer controls
- * policy via the pre-execution hook (tool.pre_execute events).
+ * Tool policy is consumer-owned. Consumers can keep using the legacy
+ * pre-execution hook or provide tool middleware that wraps execution.
  *
  * No Vue, React, or any UI framework dependency.
  */
@@ -35,6 +35,7 @@ import type {
   SessionInfo,
   SessionListResult,
   ToolInvokeResult,
+  ToolMiddleware,
 } from './definitions'
 import { McpServerManager, type McpServerOptions } from './mcp/mcp-server-manager'
 import { DbBridgeHandler } from './services/db-bridge-handler'
@@ -71,6 +72,7 @@ export class MobileClawEngine {
   private _cronDb: CronDbAccess | null = null
   private _heartbeatManager: HeartbeatManager | null = null
   private _extraAgentTools: AgentTool[] = []
+  private _toolMiddleware?: ToolMiddleware
   private _webViewFetchProxyInstalled = false
   /** Pending pre-execute resolvers keyed by toolCallId */
   private _preExecuteResolvers = new Map<string, (result: PreExecuteResult) => void>()
@@ -173,6 +175,7 @@ export class MobileClawEngine {
 
       // ── WebView agent setup (instant, no worker dependency) ────────────
       this._useWebViewAgent = options.useWebViewAgent ?? false
+      this._toolMiddleware = options.toolMiddleware
       if (this._useWebViewAgent) {
         await this._installWebViewFetchProxy()
         this._toolProxy = new ToolProxy()
@@ -185,8 +188,10 @@ export class MobileClawEngine {
         this._agentRunner = new AgentRunner({
           dispatch: (msg) => this._dispatch(msg),
           toolProxy: this._toolProxy,
-          preExecuteHook: (toolCallId, toolName, args, signal) =>
-            this._handlePreExecute(toolCallId, toolName, args, signal),
+          toolMiddleware: this._toolMiddleware,
+          preExecuteHook: this._toolMiddleware
+            ? undefined
+            : (toolCallId, toolName, args, signal) => this._handlePreExecute(toolCallId, toolName, args, signal),
         })
 
         // Listen for tool execution results from the worker
@@ -962,9 +967,53 @@ export class MobileClawEngine {
     })
   }
 
-  async resumeSession(sessionKey: string, agentId = 'main'): Promise<void> {
+  async resumeSession(
+    sessionKey: string,
+    agentId = 'main',
+    options?: { messages?: import('@mariozechner/pi-agent-core').AgentMessage[] },
+  ): Promise<{ success: boolean; error?: string; sessionKey?: string; messageCount?: number }> {
+    this._currentSessionKey = sessionKey
+
+    if (this._useWebViewAgent && this._agentRunner) {
+      try {
+        const [authResult, promptResult] = await Promise.all([
+          this._waitForMessage<{ apiKey: string | null; isOAuth: boolean }>('auth.getToken.result', {
+            type: 'auth.getToken',
+            provider: 'anthropic',
+            agentId,
+          }),
+          this._waitForMessage<{ systemPrompt: string }>('system_prompt.get.result', {
+            type: 'system_prompt.get',
+            agentId,
+          }),
+        ])
+
+        if (!authResult.apiKey) {
+          return { success: false, error: 'No API key configured' }
+        }
+
+        const messages = options?.messages ?? []
+        await this._agentRunner.resume({
+          sessionKey,
+          messages,
+          systemPrompt: promptResult.systemPrompt,
+          apiKey: authResult.apiKey,
+          provider: 'anthropic',
+          extraTools: this._extraAgentTools,
+        })
+
+        return {
+          success: true,
+          sessionKey,
+          messageCount: messages.length,
+        }
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Failed to resume session' }
+      }
+    }
+
     return new Promise((resolve) => {
-      this._onMessage('session.resume.result', () => resolve(), { once: true })
+      this._onMessage('session.resume.result', (msg) => resolve(msg), { once: true })
       this.send({ type: 'session.resume', sessionKey, agentId })
     })
   }
@@ -1055,5 +1104,13 @@ export class MobileClawEngine {
    */
   onMessage(type: string, handler: MessageHandler, opts?: { once?: boolean }): () => void {
     return this._onMessage(type, handler, opts)
+  }
+
+  /**
+   * Dispatch a message directly to local listeners.
+   * Useful for consumer-owned middleware that needs to emit UI events.
+   */
+  dispatchEvent(message: Record<string, unknown>): void {
+    this._dispatch(message)
   }
 }
