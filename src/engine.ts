@@ -331,6 +331,8 @@ export class MobileClawEngine {
         return
       }
     }
+    // Vite stubs optional peer deps as empty objects -- bail if real plugin missing
+    if (!MobileCron || typeof MobileCron.register !== 'function') return
     this._mobileCron = MobileCron
 
     const schedulerConfig = await this.getSchedulerConfig()

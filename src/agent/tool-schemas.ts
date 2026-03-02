@@ -79,7 +79,7 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
     name: 'execute_js',
     label: 'Execute JS',
     description:
-      'Execute JavaScript code in a sandboxed VM. Returns stdout (captured console.log output) and the result of the last expression. No access to require, process, fs, or network. 5-second timeout.',
+      'Execute JavaScript code in a sandboxed QuickJS (WASI) environment. Returns stdout (captured console.log output). No access to require, process, fs, or network. 5-second timeout.',
     parameters: Type.Object({
       code: Type.String({ description: 'JavaScript code to execute' }),
     }),
@@ -88,7 +88,7 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
     name: 'execute_python',
     label: 'Execute Python',
     description:
-      'Execute Python code in a sandboxed Pyodide (WebAssembly) environment. Returns stdout (captured print output) and the result of the last expression. Includes math, json, re, collections, itertools, functools, datetime. No filesystem, network, or subprocess access. 5-second timeout.',
+      'Execute Python code in a sandboxed RustPython (WASI) environment. Returns stdout (captured print output). Includes math, json, re, collections, itertools, functools, datetime. No filesystem, network, or subprocess access. 5-second timeout.',
     parameters: Type.Object({
       code: Type.String({ description: 'Python code to execute' }),
     }),

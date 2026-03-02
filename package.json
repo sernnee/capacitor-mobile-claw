@@ -56,13 +56,17 @@
     "@capacitor/device": "^8.0.0",
     "@choreruiz/capacitor-node-js": ">=1.0.0",
     "@modelcontextprotocol/sdk": ">=1.0.0",
-    "capacitor-mobilecron": ">=0.1.0"
+    "capacitor-mobilecron": ">=0.1.0",
+    "capacitor-wasm-agent-tools": ">=0.1.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
       "optional": true
     },
     "capacitor-mobilecron": {
+      "optional": true
+    },
+    "capacitor-wasm-agent-tools": {
       "optional": true
     }
   },
@@ -76,9 +80,9 @@
     "@commitlint/config-conventional": "^19.0.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@stomp/stompjs": "^7.0.0",
+    "capacitor-wasm-agent-tools": "^0.1.0",
     "isomorphic-git": "^1.37.2",
     "lefthook": "^1.6.0",
-    "pyodide": "^0.27.5",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
   },

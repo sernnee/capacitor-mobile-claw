@@ -13,6 +13,13 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core'
 import { TOOL_SCHEMAS } from './tool-schemas'
+import { executeJsNative, executePythonNative } from './wasm-tools'
+
+/** Tools executed natively via Capacitor plugin, bypassing the Node.js worker. */
+const NATIVE_TOOLS: Record<string, (params: Record<string, unknown>) => Promise<AgentToolResult<unknown>>> = {
+  execute_js: executeJsNative,
+  execute_python: executePythonNative,
+}
 
 const WORKER_BOOT_TIMEOUT_MS = 30_000
 
@@ -86,6 +93,10 @@ export class ToolProxy {
       description: schema.description,
       parameters: schema.parameters,
       execute: (toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => {
+        const nativeFn = NATIVE_TOOLS[schema.name]
+        if (nativeFn) {
+          return nativeFn(params)
+        }
         return this._executeViaWorker(schema.name, toolCallId, params, signal)
       },
     }))

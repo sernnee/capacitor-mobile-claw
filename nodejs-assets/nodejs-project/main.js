@@ -375,7 +375,7 @@ import {
   statSync,
 } from 'node:fs';
 import * as nodeFs from 'node:fs';
-import vm from 'node:vm';
+// vm import removed — JS execution moved to native capacitor-wasm-agent-tools plugin
 
 const SKIP_DIRS = new Set(['.git', '.openclaw', 'node_modules']);
 
@@ -571,91 +571,8 @@ function editFileTool(args) {
   }
 }
 
-// ── Code execution (Phase 3) ─────────────────────────────────────────────
-
-function executeJsTool(args) {
-  const stdoutLines = [];
-  const sandbox = {
-    console: {
-      log: (...a) => stdoutLines.push(a.map(String).join(' ')),
-      warn: (...a) => stdoutLines.push('[warn] ' + a.map(String).join(' ')),
-      error: (...a) => stdoutLines.push('[error] ' + a.map(String).join(' ')),
-    },
-    Math, Date, JSON, parseInt, parseFloat, isNaN, isFinite,
-    String, Number, Boolean, Array, Object, Map, Set, RegExp,
-    Error, TypeError, RangeError, Promise, Symbol,
-    process: undefined, require: undefined, global: undefined,
-    globalThis: undefined, Buffer: undefined,
-    setTimeout: undefined, setInterval: undefined,
-  };
-  const context = vm.createContext(sandbox);
-  try {
-    const result = vm.runInContext(args.code, context, { timeout: 5000, filename: 'sandbox.js' });
-    const stdout = stdoutLines.join('\n');
-    return {
-      stdout: stdout.substring(0, 50000),
-      result: result !== undefined ? String(result) : undefined,
-    };
-  } catch (err) {
-    return {
-      stdout: stdoutLines.join('\n').substring(0, 50000),
-      error: err.message || 'Execution failed',
-    };
-  }
-}
-
-// ── Python execution (Phase 5) ───────────────────────────────────────────
-
-import { loadPyodide } from 'pyodide';
-
-let pyodideInstance = null;
-
-async function getPyodide() {
-  if (!pyodideInstance) {
-    pyodideInstance = await loadPyodide();
-    // Block dangerous modules for sandbox security
-    pyodideInstance.runPython(`
-import sys
-for _mod in ['subprocess', 'socket', 'http', 'urllib', 'ftplib', 'smtplib',
-             'webbrowser', 'ctypes', 'multiprocessing', 'shutil', 'tempfile',
-             'signal', 'resource']:
-    sys.modules[_mod] = None
-del _mod
-`);
-  }
-  return pyodideInstance;
-}
-
-async function executePythonTool(args) {
-  const stdoutLines = [];
-  const stderrLines = [];
-
-  try {
-    const pyodide = await getPyodide();
-
-    // Redirect stdout/stderr for this execution
-    pyodide.setStdout({ batched: (line) => stdoutLines.push(line) });
-    pyodide.setStderr({ batched: (line) => stderrLines.push('[stderr] ' + line) });
-
-    // Run with timeout (5 seconds, matching JS sandbox)
-    const result = await Promise.race([
-      pyodide.runPythonAsync(args.code),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Execution timed out (5s)')), 5000)),
-    ]);
-
-    const stdout = [...stdoutLines, ...stderrLines].join('\n');
-    return {
-      stdout: stdout.substring(0, 50000),
-      result: result !== undefined && result !== null ? String(result) : undefined,
-    };
-  } catch (err) {
-    const stdout = [...stdoutLines, ...stderrLines].join('\n');
-    return {
-      stdout: stdout.substring(0, 50000),
-      error: err.message || 'Python execution failed',
-    };
-  }
-}
+// ── Code execution (JS/Python) moved to native capacitor-wasm-agent-tools plugin ──
+// See mobile-claw/src/agent/wasm-tools.ts
 
 // ── Git tools (Phase 3) ──────────────────────────────────────────────────
 
@@ -1075,24 +992,8 @@ function buildAgentTools() {
       }),
       execute: async (_id, params) => toToolResult(editFileTool(params)),
     },
-    {
-      name: 'execute_js',
-      label: 'Execute JS',
-      description: 'Execute JavaScript code in a sandboxed VM. Returns stdout (captured console.log output) and the result of the last expression. No access to require, process, fs, or network. 5-second timeout.',
-      parameters: Type.Object({
-        code: Type.String({ description: 'JavaScript code to execute' }),
-      }),
-      execute: async (_id, params) => toToolResult(executeJsTool(params)),
-    },
-    {
-      name: 'execute_python',
-      label: 'Execute Python',
-      description: 'Execute Python code in a sandboxed Pyodide (WebAssembly) environment. Returns stdout (captured print output) and the result of the last expression. Includes math, json, re, collections, itertools, functools, datetime. No filesystem, network, or subprocess access. 5-second timeout.',
-      parameters: Type.Object({
-        code: Type.String({ description: 'Python code to execute' }),
-      }),
-      execute: async (_id, params) => toToolResult(await executePythonTool(params)),
-    },
+    // execute_js and execute_python moved to native capacitor-wasm-agent-tools plugin
+    // (dispatched directly from WebView via tool-proxy.ts, not through this worker)
     {
       name: 'git_init',
       label: 'Git Init',
@@ -2219,8 +2120,6 @@ channel.addListener('message', async (event) => {
         grep_files: grepFilesTool,
         find_files: findFilesTool,
         edit_file: editFileTool,
-        execute_js: executeJsTool,
-        execute_python: executePythonTool,
         git_init: gitInitTool,
         git_status: gitStatusTool,
         git_add: gitAddTool,
@@ -2258,8 +2157,6 @@ channel.addListener('message', async (event) => {
         grep_files: grepFilesTool,
         find_files: findFilesTool,
         edit_file: editFileTool,
-        execute_js: executeJsTool,
-        execute_python: executePythonTool,
         git_init: gitInitTool,
         git_status: gitStatusTool,
         git_add: gitAddTool,
