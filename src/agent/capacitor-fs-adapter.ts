@@ -9,7 +9,12 @@
  * absolute paths when `dir` is set.
  */
 
+import { Capacitor } from '@capacitor/core'
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem'
+
+function getDataDirectory(): Directory {
+  return Capacitor.getPlatform() === 'ios' ? Directory.Library : Directory.Data
+}
 
 /**
  * Convert an absolute-looking path to a path relative to Directory.Data.
@@ -45,7 +50,7 @@ const promises = {
       if (encoding === 'utf8') {
         const result = await Filesystem.readFile({
           path,
-          directory: Directory.Data,
+          directory: getDataDirectory(),
           encoding: Encoding.UTF8,
         })
         return result.data as string
@@ -54,7 +59,7 @@ const promises = {
       // Binary read — return Uint8Array
       const result = await Filesystem.readFile({
         path,
-        directory: Directory.Data,
+        directory: getDataDirectory(),
       })
 
       // Capacitor returns base64 string for binary reads
@@ -83,7 +88,7 @@ const promises = {
       await Filesystem.writeFile({
         path,
         data,
-        directory: Directory.Data,
+        directory: getDataDirectory(),
         encoding: Encoding.UTF8,
         recursive: true,
       })
@@ -97,7 +102,7 @@ const promises = {
       await Filesystem.writeFile({
         path,
         data: base64,
-        directory: Directory.Data,
+        directory: getDataDirectory(),
         recursive: true,
       })
     }
@@ -108,7 +113,7 @@ const promises = {
     try {
       await Filesystem.mkdir({
         path,
-        directory: Directory.Data,
+        directory: getDataDirectory(),
         recursive: true,
       })
     } catch (err: any) {
@@ -122,7 +127,7 @@ const promises = {
     const path = toRelative(filepath)
     await Filesystem.rmdir({
       path,
-      directory: Directory.Data,
+      directory: getDataDirectory(),
       recursive: true,
     })
   },
@@ -131,7 +136,7 @@ const promises = {
     const path = toRelative(filepath)
     await Filesystem.deleteFile({
       path,
-      directory: Directory.Data,
+      directory: getDataDirectory(),
     })
   },
 
@@ -153,7 +158,7 @@ const promises = {
     try {
       const result = await Filesystem.stat({
         path,
-        directory: Directory.Data,
+        directory: getDataDirectory(),
       })
 
       const isDir = result.type === 'directory'
@@ -186,7 +191,7 @@ const promises = {
     const path = toRelative(filepath)
     const result = await Filesystem.readdir({
       path,
-      directory: Directory.Data,
+      directory: getDataDirectory(),
     })
     // Strip trailing slashes that Android Capacitor Filesystem appends to directory names.
     // isomorphic-git calls stat() on each returned name; a trailing slash causes stat to

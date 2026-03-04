@@ -7,13 +7,11 @@
 
 import type { StompConfig } from '../definitions'
 import type { DeviceTool } from './tools/types'
-import { BridgeServerTransport } from './transport/bridge-server-transport'
 import { TransportManager } from './transport/transport-manager'
 
 export type McpStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
 export interface McpServerOptions {
-  enableBridge?: boolean
   enableStomp?: boolean
   stompConfig?: StompConfig
   /** MCP device tools to register. Provided by the caller (e.g. from a tools package). */
@@ -74,14 +72,6 @@ export class McpServerManager {
 
       // Create transport manager
       this.manager = new TransportManager(() => tools)
-
-      // Bridge transport: ON by default
-      if (options.enableBridge !== false) {
-        const { NodeJS } = await import('@choreruiz/capacitor-node-js')
-        const bridgeTransport = new BridgeServerTransport(NodeJS)
-        await this.manager.addTransport('bridge', bridgeTransport)
-        console.log('[MCP] Bridge transport active — worker can call device tools')
-      }
 
       // STOMP transport: OFF by default
       if (options.enableStomp && options.stompConfig) {

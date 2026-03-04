@@ -191,6 +191,7 @@ export class AgentRunner {
         sessionKey: params.sessionKey,
         usage,
         cumulativeUsage: usage,
+        model: modelId,
         durationMs: Date.now() - startTime,
       })
     } catch (err: any) {
@@ -256,6 +257,7 @@ export class AgentRunner {
         sessionKey: this.currentSessionKey,
         usage,
         cumulativeUsage: usage,
+        model: (this.agent?.state as any)?.model?.id ?? undefined,
         durationMs: Date.now() - startTime,
       })
     } catch (err: any) {

@@ -192,16 +192,12 @@ export type ToolMiddleware = (
 ) => Promise<any>
 
 export interface MobileClawInitOptions {
-  /** Enable bridge MCP transport (in-process device tools). Default: true. */
-  enableBridge?: boolean
   /** Enable STOMP MCP transport (remote access). Default: false. */
   enableStomp?: boolean
   /** Custom STOMP config when enableStomp is true. */
   stompConfig?: StompConfig
   /** MCP device tools to register. Pass from an external tools package. */
   tools?: DeviceTool[]
-  /** Worker startup timeout in ms. Default: 60000. */
-  workerTimeout?: number
   /** Pre-imported MobileCron plugin instance. Avoids dynamic import issues in Capacitor WebView. */
   mobileCron?: any
   /**

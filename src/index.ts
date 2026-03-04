@@ -4,14 +4,14 @@
  * Usage:
  *   import { MobileClaw } from 'capacitor-mobile-claw'
  *
- *   const info = await MobileClaw.init()
- *   console.log(`Worker ready: Node ${info.nodeVersion}, ${info.mcpToolCount} tools`)
+ *   const engine = MobileClawEngine.getInstance()
+ *   await engine.init()
  *
- *   MobileClaw.addListener('agentEvent', (e) => {
+ *   engine.on('agentEvent', (e) => {
  *     if (e.eventType === 'text_delta') process.stdout.write(e.data.text)
  *   })
  *
- *   const { sessionKey } = await MobileClaw.sendMessage({ prompt: 'Hello!' })
+ *   const { sessionKey } = await engine.sendMessage({ prompt: 'Hello!' })
  */
 
 import { registerPlugin } from '@capacitor/core'
@@ -38,18 +38,3 @@ export { McpServerManager } from './mcp/mcp-server-manager'
 
 // DeviceTool interface — the contract for external tool packages
 export type { DeviceTool } from './mcp/tools/types'
-
-// Re-export bridge protocol types for consumers building custom integrations
-export type {
-  AgentCompletedMessage,
-  AgentErrorMessage,
-  AgentEventMessage,
-  AgentStartMessage,
-  AgentStopMessage,
-  NodeToUIMessage,
-  ReadyMessage,
-  ToolPreExecuteExpiredMessage,
-  ToolPreExecuteMessage,
-  ToolPreExecuteResultMessage,
-  UIToNodeMessage,
-} from './services/bridge-protocol'

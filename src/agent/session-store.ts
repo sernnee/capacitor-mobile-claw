@@ -1,11 +1,7 @@
 /**
  * SessionStore — Direct SQLite session persistence from the WebView.
  *
- * Accesses the same `mobile-claw` database used by DbBridgeHandler,
- * eliminating the worker→bridge→WebView→SQLite round-trip for session
- * save/load operations.
- *
- * Uses @capacitor-community/sqlite directly (same as DbBridgeHandler).
+ * Uses @capacitor-community/sqlite for all session save/load operations.
  */
 
 import { Capacitor } from '@capacitor/core'
@@ -20,7 +16,6 @@ export class SessionStore {
 
   /**
    * Ensure the DB connection is open. Idempotent — safe to call multiple times.
-   * Reuses the existing connection created by DbBridgeHandler.
    */
   async ensureReady(): Promise<void> {
     if (this.db) return
@@ -51,12 +46,45 @@ export class SessionStore {
     if (isConn.result) {
       this.db = await this.sqlite.retrieveConnection(DB_NAME, false)
     } else {
-      // DbBridgeHandler should have already created the connection.
-      // If not, create one (migrations are handled by DbBridgeHandler).
+      // Create a new connection if one doesn't exist yet.
       this.db = await this.sqlite.createConnection(DB_NAME, false, 'no-encryption', 2, false)
     }
 
     await this.db.open()
+
+    // Ensure schema exists (was previously handled by DbBridgeHandler)
+    await this.db.execute(
+      `
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_key TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL DEFAULT 'main',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        model TEXT,
+        total_tokens INTEGER DEFAULT 0,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS messages (
+        session_key TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT,
+        timestamp INTEGER,
+        model TEXT,
+        tool_call_id TEXT,
+        usage_input INTEGER,
+        usage_output INTEGER,
+        PRIMARY KEY (session_key, sequence),
+        FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sessions_agent_updated ON sessions(agent_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key);
+    `,
+      false,
+    )
   }
 
   // ── Save ─────────────────────────────────────────────────────────────────

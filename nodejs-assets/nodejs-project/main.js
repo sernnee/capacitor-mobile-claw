@@ -1254,9 +1254,9 @@ async function _checkpointMessages(agent, agentId, sessionKey) {
   }
 }
 
-function persistCurrentSession(startTime = Date.now(), agentId = 'main', sessionKey = currentSessionKey) {
+async function persistCurrentSession(startTime = Date.now(), agentId = 'main', sessionKey = currentSessionKey) {
   if (!currentAgent || !sessionKey) return;
-  saveSession(currentAgent, agentId, sessionKey, startTime);
+  await saveSession(currentAgent, agentId, sessionKey, startTime);
 }
 
 // ── Error classification ─────────────────────────────────────────────────
@@ -1520,7 +1520,7 @@ async function runSkill(agentId, locale = 'en', injectedConfig = null) {
       }
     }
 
-    saveSession(agent, agentId, sessionKey, startTime);
+    await saveSession(agent, agentId, sessionKey, startTime);
 
     const usage = extractUsage(agent);
     channel.send('message', {

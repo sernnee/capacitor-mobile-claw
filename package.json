@@ -1,7 +1,7 @@
 {
   "name": "capacitor-mobile-claw",
-  "version": "1.6.12",
-  "description": "On-device AI agent engine for Capacitor apps — embedded Node.js worker with LLM, file tools, code execution, git, and extensible MCP server",
+  "version": "1.8.0",
+  "description": "On-device AI agent engine for Capacitor apps — native WebView LLM agent with file tools, code execution, git, and extensible MCP server",
   "main": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
   "type": "module",
@@ -24,7 +24,6 @@
     }
   },
   "scripts": {
-    "worker:install": "cd nodejs-assets/nodejs-project && npm install --production",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "test": "vitest run",
@@ -39,8 +38,6 @@
   },
   "files": [
     "dist/esm/",
-    "nodejs-assets/",
-    "!nodejs-assets/nodejs-project/node_modules/",
     "android/src/main/",
     "android/build.gradle",
     "ios/Plugin/",
@@ -49,13 +46,14 @@
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.55.1",
     "@mariozechner/pi-ai": "^0.55.1",
-    "@sinclair/typebox": "^0.34.41"
+    "@sinclair/typebox": "^0.34.41",
+    "isomorphic-git": "^1.37.2"
   },
   "peerDependencies": {
     "@capacitor-community/sqlite": ">=6.0.0",
     "@capacitor/core": "^8.0.0",
     "@capacitor/device": "^8.0.0",
-    "@choreruiz/capacitor-node-js": ">=1.0.0",
+    "@capacitor/filesystem": "^8.0.0",
     "@modelcontextprotocol/sdk": ">=1.0.0",
     "capacitor-mobilecron": ">=0.1.0",
     "capacitor-wasm-agent-tools": ">=0.1.0"
@@ -76,7 +74,7 @@
     "@capacitor-community/sqlite": "^8.0.0",
     "@capacitor/core": "^8.1.0",
     "@capacitor/device": "^8.0.1",
-    "@choreruiz/capacitor-node-js": "^1.0.0",
+    "@capacitor/filesystem": "^8.1.2",
     "@commitlint/cli": "^19.0.0",
     "@commitlint/config-conventional": "^19.0.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -96,7 +94,6 @@
     "llm",
     "anthropic",
     "claude",
-    "node.js",
     "file-tools",
     "mcp",
     "model-context-protocol",

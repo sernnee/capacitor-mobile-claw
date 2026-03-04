@@ -1,9 +1,9 @@
 /**
  * MobileClawEngine — Framework-agnostic core engine.
  *
- * This is the headless implementation of the MobileClaw plugin.
- * It manages the embedded Node.js worker, bridge communication,
- * MCP server lifecycle, and exposes all plugin API methods.
+ * Runs entirely in the WebView. No Node.js worker dependency.
+ * All tools (file I/O, git, code execution) run natively via
+ * Capacitor plugins or WebAssembly.
  *
  * Tool policy is consumer-owned. Consumers can keep using the legacy
  * pre-execution hook or provide tool middleware that wraps execution.
@@ -13,10 +13,14 @@
 
 import { Capacitor } from '@capacitor/core'
 import { AgentRunner, type PreExecuteResult } from './agent/agent-runner'
+import { getAuthStatus as getAuthStatusNative, getAuthToken, setAuthRoot } from './agent/auth-store'
 import { CronDbAccess } from './agent/cron-db-access'
+import { readFileNative, setWorkspaceRoot, writeFileNative } from './agent/file-tools'
+import { setWorkspaceDir } from './agent/git-tools'
 import { HeartbeatManager } from './agent/heartbeat-manager'
 import { SessionStore } from './agent/session-store'
 import { ToolProxy } from './agent/tool-proxy'
+import { getModels as getModelsNative, initWorkspace, loadSystemPrompt } from './agent/workspace-init'
 import type {
   AuthStatus,
   CronJobInput,
@@ -38,18 +42,15 @@ import type {
   ToolMiddleware,
 } from './definitions'
 import { McpServerManager, type McpServerOptions } from './mcp/mcp-server-manager'
-import { DbBridgeHandler } from './services/db-bridge-handler'
 
 type MessageHandler = (msg: any) => void
 type AgentTool = import('@mariozechner/pi-agent-core').AgentTool<any>
-const HEARTBEAT_BRIDGE_TIMEOUT_MS = 10_000
 
 export class MobileClawEngine {
   // ── State ──────────────────────────────────────────────────────────────
 
   private _ready = false
   private _available = false
-  private _nodeVersion: string | null = null
   private _openclawRoot: string | null = null
   private _mcpToolCount = 0
   private _loading = false
@@ -57,15 +58,12 @@ export class MobileClawEngine {
   private _currentSessionKey: string | null = null
   private _loadingPhase: string = 'starting'
 
-  private nodePlugin: any = null
   private listeners = new Map<string, Set<MessageHandler>>()
   private initPromise: Promise<MobileClawReadyInfo> | null = null
   private _mcpManager: McpServerManager | null = null
-  private _dbHandler: DbBridgeHandler | null = null
   private _mobileCron: any = null
 
-  // ── WebView agent (when useWebViewAgent is enabled) ───────────────────
-  private _useWebViewAgent = false
+  // ── Agent ──────────────────────────────────────────────────────────────
   private _agentRunner: AgentRunner | null = null
   private _toolProxy: ToolProxy | null = null
   private _sessionStore: SessionStore | null = null
@@ -85,8 +83,9 @@ export class MobileClawEngine {
   get available(): boolean {
     return this._available
   }
+  /** @deprecated No Node.js worker — always returns null */
   get nodeVersion(): string | null {
-    return this._nodeVersion
+    return null
   }
   get openclawRoot(): string | null {
     return this._openclawRoot
@@ -112,12 +111,12 @@ export class MobileClawEngine {
     return this._mcpManager
   }
 
-  /** Whether the WebView agent is enabled. */
+  /** @deprecated Always true — the WebView agent is the only agent. */
   get useWebViewAgent(): boolean {
-    return this._useWebViewAgent
+    return true
   }
 
-  /** Access the agent runner (only available when useWebViewAgent is true). */
+  /** Access the agent runner. */
   get agentRunner(): AgentRunner | null {
     return this._agentRunner
   }
@@ -139,144 +138,82 @@ export class MobileClawEngine {
 
     this._loading = true
     this._error = null
+    this._loadingPhase = 'initializing workspace'
 
     try {
-      const { NodeJS } = await import('@choreruiz/capacitor-node-js')
-      this.nodePlugin = NodeJS
       this._available = true
 
-      // Debug: send trace messages to worker so they appear in native logs
-      const _trace = (label: string) => {
-        this.nodePlugin?.send({ eventName: 'message', args: [{ type: 'webview_trace', label }] }).catch(() => {})
-      }
+      // ── Workspace initialization (creates dirs + default files) ──────
+      const { openclawRoot } = await initWorkspace()
+      this._openclawRoot = openclawRoot
 
-      // Register message listener FIRST — the worker may have already
-      // emitted worker.ready before MCP init completes.
-      this.nodePlugin.addListener('message', (event: any) => {
-        const msg = event?.args?.[0] ?? event
-        if (!msg || !msg.type) return
-        if (msg.type === 'worker.ready') _trace('GOT worker.ready via dispatch')
-        this._dispatch(msg)
-      })
+      // Configure native tools with workspace paths
+      setWorkspaceRoot(`${openclawRoot}/workspace`)
+      setWorkspaceDir(`/${openclawRoot}/workspace`)
+      setAuthRoot(openclawRoot)
 
-      this._onMessage('worker.tools_updated', (msg) => {
-        if (msg?.mcpToolCount == null) return
-        this._mcpToolCount = msg.mcpToolCount
-        console.log(`[MobileClaw] Tools updated — ${this._mcpToolCount} MCP tools`)
-      })
+      this._loadingPhase = 'setting up agent'
 
-      this._onMessage('worker.loading_phase', (msg) => {
-        if (msg?.phase) this._loadingPhase = msg.phase
-      })
+      // ── Fetch proxy (native HTTP for CORS bypass) ───────────────────
+      await this._installWebViewFetchProxy()
 
-      // Start DB bridge handler — must be ready before worker sends db.init
-      this._dbHandler = new DbBridgeHandler(this.nodePlugin)
-      this._dbHandler.start()
+      // ── Tool proxy (all tools run natively now) ─────────────────────
+      this._toolProxy = new ToolProxy()
+      this._extraAgentTools = this._buildExtraAgentTools(options.tools)
 
-      // ── WebView agent setup (instant, no worker dependency) ────────────
-      this._useWebViewAgent = options.useWebViewAgent ?? false
+      // ── Session store (SQLite) ──────────────────────────────────────
+      this._sessionStore = new SessionStore()
+
+      // ── Tool middleware ─────────────────────────────────────────────
       this._toolMiddleware = options.toolMiddleware
-      if (this._useWebViewAgent) {
-        await this._installWebViewFetchProxy()
-        this._toolProxy = new ToolProxy()
-        this._extraAgentTools = this._buildExtraAgentTools(options.tools)
-        // Set up bridge send function — nodePlugin.send is available immediately
-        this._toolProxy.setBridge((msg) => this.send(msg))
 
-        this._sessionStore = new SessionStore()
-
-        this._agentRunner = new AgentRunner({
-          dispatch: (msg) => this._dispatch(msg),
-          toolProxy: this._toolProxy,
-          toolMiddleware: this._toolMiddleware,
-          preExecuteHook: this._toolMiddleware
-            ? undefined
-            : (toolCallId, toolName, args, signal) => this._handlePreExecute(toolCallId, toolName, args, signal),
-        })
-
-        // Listen for tool execution results from the worker
-        this._onMessage('tool.execute.result', (msg) => {
-          this._toolProxy?.handleResult(msg)
-        })
-
-        // Auto-save session to SQLite on agent completion
-        this._onMessage('agent.completed', (msg) => {
-          if (!this._useWebViewAgent || !this._sessionStore || !this._agentRunner?.currentAgent) return
-          const agent = this._agentRunner.currentAgent
-          const sessionKey = msg.sessionKey || this._currentSessionKey
-          if (!sessionKey) return
-          this._sessionStore
-            .saveSession({
-              sessionKey,
-              agentId: 'main',
-              messages: agent.state.messages as any[],
-              model: msg.usage?.model,
-              startTime: msg.durationMs ? Date.now() - msg.durationMs : Date.now(),
-            })
-            .catch((err: any) => {
-              console.warn('[MobileClaw] Session save failed:', err?.message)
-            })
-        })
-
-        this._cronDb = new CronDbAccess()
-        this._heartbeatManager = new HeartbeatManager({
-          dispatch: (msg) => this._dispatch(msg),
-          toolProxy: this._toolProxy,
-          cronDb: this._cronDb,
-          getAuth: (provider, agentId) =>
-            this._waitForMessageWithTimeout('auth.getToken.result', HEARTBEAT_BRIDGE_TIMEOUT_MS, {
-              type: 'auth.getToken',
-              provider,
-              agentId,
-            }),
-          getSystemPrompt: (agentId) =>
-            this._waitForMessageWithTimeout('system_prompt.get.result', HEARTBEAT_BRIDGE_TIMEOUT_MS, {
-              type: 'system_prompt.get',
-              agentId,
-            }),
-          isUserAgentRunning: () => this._agentRunner?.isRunning ?? false,
-          getCurrentSessionKey: () => this._currentSessionKey,
-          extraTools: this._extraAgentTools,
-        })
-      }
-
-      // Set up worker.ready promise before MCP init (captures early ready events)
-      const timeout = options.workerTimeout ?? 60_000
-      const readyPromise = new Promise<MobileClawReadyInfo>((resolve) => {
-        const timer = setTimeout(() => {
-          this._error = `Worker startup timeout (${timeout}ms)`
-          this._loading = false
-          resolve({ nodeVersion: '', openclawRoot: '', mcpToolCount: this._mcpToolCount })
-        }, timeout)
-
-        this._onMessage(
-          'worker.ready',
-          (msg) => {
-            clearTimeout(timer)
-            _trace(`worker.ready HANDLER fired — nodeVersion=${msg.nodeVersion}`)
-            this._ready = true
-            this._nodeVersion = msg.nodeVersion
-            this._openclawRoot = msg.openclawRoot
-            this._mcpToolCount = msg.mcpToolCount ?? this._mcpToolCount
-            this._loading = false
-            this._error = null
-            // Flush pending tool calls now that the worker is ready
-            this._toolProxy?.setWorkerReady()
-            resolve({
-              nodeVersion: msg.nodeVersion,
-              openclawRoot: msg.openclawRoot,
-              mcpToolCount: this._mcpToolCount,
-            })
-          },
-          { once: true },
-        )
+      // ── Agent runner ────────────────────────────────────────────────
+      this._agentRunner = new AgentRunner({
+        dispatch: (msg) => this._dispatch(msg),
+        toolProxy: this._toolProxy,
+        toolMiddleware: this._toolMiddleware,
+        preExecuteHook: this._toolMiddleware
+          ? undefined
+          : (toolCallId, toolName, args, signal) => this._handlePreExecute(toolCallId, toolName, args, signal),
       })
 
-      // Start MCP bridge (worker calls tools/list during init)
+      // Auto-save session to SQLite on agent completion
+      this._onMessage('agent.completed', (msg) => {
+        if (!this._sessionStore || !this._agentRunner?.currentAgent) return
+        const agent = this._agentRunner.currentAgent
+        const sessionKey = msg.sessionKey || this._currentSessionKey
+        if (!sessionKey) return
+        this._sessionStore
+          .saveSession({
+            sessionKey,
+            agentId: 'main',
+            messages: agent.state.messages as any[],
+            model: msg.model,
+            startTime: msg.durationMs ? Date.now() - msg.durationMs : Date.now(),
+          })
+          .catch((err: any) => {
+            console.warn('[MobileClaw] Session save failed:', err?.message)
+          })
+      })
+
+      // ── Cron / heartbeat ────────────────────────────────────────────
+      this._cronDb = new CronDbAccess()
+      this._heartbeatManager = new HeartbeatManager({
+        dispatch: (msg) => this._dispatch(msg),
+        toolProxy: this._toolProxy,
+        cronDb: this._cronDb,
+        getAuth: async (provider, _agentId) => getAuthToken(provider, _agentId),
+        getSystemPrompt: async () => ({ systemPrompt: await loadSystemPrompt() }),
+        isUserAgentRunning: () => this._agentRunner?.isRunning ?? false,
+        getCurrentSessionKey: () => this._currentSessionKey,
+        extraTools: this._extraAgentTools,
+      })
+
+      // ── MCP server ─────────────────────────────────────────────────
+      this._loadingPhase = 'starting MCP'
       try {
         this._mcpManager = new McpServerManager()
         const mcpOpts: McpServerOptions = {
-          enableBridge: options.enableBridge !== false,
           enableStomp: options.enableStomp ?? false,
           stompConfig: options.stompConfig,
           tools: options.tools,
@@ -288,32 +225,30 @@ export class MobileClawEngine {
         console.warn('[MobileClaw] MCP bridge start failed (non-fatal):', mcpErr)
       }
 
-      // iOS race condition workaround: on iOS the Node engine starts during
-      // plugin load() (before JS has registered listeners), so the worker.ready
-      // message may have already fired and been lost.  Use the native whenReady()
-      // method to detect this, then ask the worker to re-emit its status.
-      this.nodePlugin
-        .whenReady()
-        .then(() => {
-          if (!this._ready) {
-            console.log('[MobileClaw] Engine ready on native side but worker.ready missed — requesting re-emit')
-            this.nodePlugin.send({ eventName: 'message', args: [{ type: 'status_ping' }] }).catch(() => {})
-          }
-        })
-        .catch(() => {})
-
-      _trace('awaiting readyPromise...')
-      const readyInfo = await readyPromise
-      _trace(`readyPromise resolved — ready=${this._ready} nodeVersion=${readyInfo.nodeVersion}`)
-
+      // ── MobileCron ─────────────────────────────────────────────────
       await this._initMobileCron(options.mobileCron).catch((err) => {
         console.warn('[MobileClaw] MobileCron init failed (non-fatal):', err)
       })
 
+      // ── Ready ──────────────────────────────────────────────────────
+      this._ready = true
+      this._loading = false
+      this._loadingPhase = 'ready'
+      this._error = null
+
+      const readyInfo: MobileClawReadyInfo = {
+        nodeVersion: '',
+        openclawRoot,
+        mcpToolCount: this._mcpToolCount,
+      }
+
+      // Emit worker.ready for backward compat with UI listeners
+      this._dispatch({ type: 'worker.ready', ...readyInfo })
+
       return readyInfo
     } catch (e: any) {
       this._available = false
-      this._error = `Capacitor-NodeJS not available: ${e.message}`
+      this._error = `Initialization failed: ${e.message}`
       this._loading = false
       return { nodeVersion: '', openclawRoot: '', mcpToolCount: 0 }
     }
@@ -357,28 +292,14 @@ export class MobileClawEngine {
         this._heartbeatManager.handleWake(event?.source || 'mobilecron').catch((err) => {
           console.warn('[MobileClaw] Heartbeat wake failed:', err?.message)
         })
-      } else {
-        this.send({
-          type: 'heartbeat.wake',
-          source: event?.source || 'mobilecron',
-          timestamp: event?.firedAt ?? Date.now(),
-        }).catch(() => {})
       }
     })
 
-    // Android WorkManager fires 'nativeWake' (not 'jobDue') for background wakes.
-    // The native CronWorker IS the sentinel timer on Android — relay it as heartbeat.wake.
     MobileCron.addListener('nativeWake', (event: any) => {
       if (this._heartbeatManager) {
         this._heartbeatManager.handleWake(event?.source || 'workmanager').catch((err) => {
           console.warn('[MobileClaw] Native wake failed:', err?.message)
         })
-      } else {
-        this.send({
-          type: 'heartbeat.wake',
-          source: event?.source || 'workmanager',
-          timestamp: Date.now(),
-        }).catch(() => {})
       }
     })
 
@@ -388,12 +309,6 @@ export class MobileClawEngine {
         this._heartbeatManager.handleWake('foreground').catch((err) => {
           console.warn('[MobileClaw] Foreground catch-up wake failed:', err?.message)
         })
-      } else {
-        this.send({
-          type: 'heartbeat.wake',
-          source: 'foreground',
-          timestamp: Date.now(),
-        }).catch(() => {})
       }
     })
 
@@ -407,11 +322,14 @@ export class MobileClawEngine {
     return { ready: this._ready }
   }
 
-  // ── Bridge communication ───────────────────────────────────────────────
+  // ── Internal messaging (local dispatch only, no worker bridge) ──────
 
+  /**
+   * @deprecated No worker to send to. Use dispatchEvent() for local events.
+   * Kept for backward compat — routes pre_execute results locally.
+   */
   async send(message: Record<string, unknown>): Promise<void> {
-    // WebView agent: intercept tool.pre_execute.result and route locally
-    if (this._useWebViewAgent && message.type === 'tool.pre_execute.result') {
+    if (message.type === 'tool.pre_execute.result') {
       const { toolCallId, args, deny, denyReason } = message as any
       return this.respondToPreExecute(
         toolCallId,
@@ -420,62 +338,8 @@ export class MobileClawEngine {
         denyReason as string | undefined,
       )
     }
-
-    if (!this.nodePlugin) {
-      console.warn('[MobileClaw] Cannot send — plugin not loaded')
-      return
-    }
-    await this.nodePlugin.send({ eventName: 'message', args: [message] })
-  }
-
-  private async _waitForMessage<T>(type: string, request?: Record<string, unknown>): Promise<T> {
-    return new Promise((resolve) => {
-      this._onMessage(type, (msg) => resolve(msg as T), { once: true })
-      if (request) {
-        this.send(request).catch((err) => {
-          console.warn(`[MobileClaw] send failed for ${type}:`, err)
-        })
-      }
-    })
-  }
-
-  private async _waitForMessageWithTimeout<T>(
-    type: string,
-    timeoutMs: number,
-    request?: Record<string, unknown>,
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      let settled = false
-      let unsub = () => {}
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        unsub()
-        reject(new Error(`Timed out waiting for ${type}`))
-      }, timeoutMs)
-
-      const finish = (fn: () => void) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        unsub()
-        fn()
-      }
-
-      unsub = this._onMessage(
-        type,
-        (msg) => {
-          finish(() => resolve(msg as T))
-        },
-        { once: true },
-      )
-
-      if (request) {
-        this.send(request).catch((err) => {
-          finish(() => reject(err instanceof Error ? err : new Error(String(err))))
-        })
-      }
-    })
+    // No worker to send to — dispatch locally for any listeners
+    this._dispatch(message as any)
   }
 
   /** Internal message listener (returns unsubscribe fn) */
@@ -529,46 +393,28 @@ export class MobileClawEngine {
       this._currentSessionKey = `session-${Date.now()}`
     }
 
-    // ── WebView agent path: run agent loop directly, no worker hop ─────
-    if (this._useWebViewAgent && this._agentRunner) {
-      const sessionKey = this._currentSessionKey
+    const sessionKey = this._currentSessionKey
 
+    if (this._agentRunner) {
       // Follow-up on existing conversation
       if (this._agentRunner.currentAgent && this._agentRunner.sessionKey === sessionKey) {
-        // Fire and forget — events dispatch directly via _dispatch()
         this._agentRunner.followUp(prompt).catch((err) => {
           this._dispatch({ type: 'agent.error', error: err.message })
         })
         return { sessionKey }
       }
 
-      // New session — fetch auth + system prompt from worker
-      this._runWebViewAgent(prompt, agentId, sessionKey, options)
-      return { sessionKey }
+      // New session
+      this._runAgent(prompt, agentId, sessionKey, options)
     }
 
-    // ── Worker agent path (legacy) ────────────────────────────────────
-    const idempotencyKey =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    await this.send({
-      type: 'agent.start',
-      agentId,
-      sessionKey: this._currentSessionKey,
-      prompt,
-      ...(options?.model && { model: options.model }),
-      ...(options?.provider && { provider: options.provider }),
-      idempotencyKey,
-    })
-    return { sessionKey: this._currentSessionKey }
+    return { sessionKey }
   }
 
   /**
-   * Start a WebView-side agent run. Fetches auth + system prompt from the
-   * worker (async), then starts the agent loop immediately in the WebView.
+   * Start an agent run. Fetches auth + system prompt directly (no worker).
    */
-  private async _runWebViewAgent(
+  private async _runAgent(
     prompt: string,
     agentId: string,
     sessionKey: string,
@@ -578,21 +424,7 @@ export class MobileClawEngine {
     const provider = options?.provider || 'anthropic'
 
     try {
-      // Fetch auth and system prompt from worker in parallel.
-      // These are fast bridge calls — worker doesn't need to be fully ready
-      // for auth.getToken (reads filesystem) or system_prompt.get.
-      // But if worker isn't ready yet, these will queue in the bridge.
-      const [authResult, promptResult] = await Promise.all([
-        this._waitForMessage<{ apiKey: string | null; isOAuth: boolean }>('auth.getToken.result', {
-          type: 'auth.getToken',
-          provider,
-          agentId,
-        }),
-        this._waitForMessage<{ systemPrompt: string }>('system_prompt.get.result', {
-          type: 'system_prompt.get',
-          agentId,
-        }),
-      ])
+      const [authResult, systemPrompt] = await Promise.all([getAuthToken(provider, agentId), loadSystemPrompt()])
 
       if (!authResult.apiKey) {
         this._dispatch({
@@ -609,11 +441,11 @@ export class MobileClawEngine {
         model: options?.model,
         provider,
         apiKey: authResult.apiKey,
-        systemPrompt: promptResult.systemPrompt,
+        systemPrompt,
         extraTools: this._extraAgentTools,
       })
     } catch (err: any) {
-      this._dispatch({ type: 'agent.error', error: err.message || 'WebView agent failed' })
+      this._dispatch({ type: 'agent.error', error: err.message || 'Agent failed' })
     }
   }
 
@@ -647,8 +479,6 @@ export class MobileClawEngine {
       return
     }
 
-    // Only proxy fetch on native platforms where the HttpStream plugin exists.
-    // In browser dev mode, standard fetch works (no CORS issues from localhost).
     if (!Capacitor.isNativePlatform()) {
       return
     }
@@ -660,7 +490,7 @@ export class MobileClawEngine {
   }
 
   /**
-   * Pre-execute hook for WebView agent: fires the event directly to UI listeners,
+   * Pre-execute hook: fires the event directly to UI listeners,
    * then waits for the consumer to respond via respondToPreExecute().
    */
   private _handlePreExecute(
@@ -703,18 +533,13 @@ export class MobileClawEngine {
   async getModels(
     provider = 'anthropic',
   ): Promise<Array<{ id: string; name: string; description: string; default?: boolean }>> {
-    return new Promise((resolve) => {
-      this._onMessage('config.models.result', (msg) => resolve(msg.models || []), { once: true })
-      this.send({ type: 'config.models', provider })
-    })
+    return getModelsNative(provider)
   }
 
   async stopTurn(): Promise<void> {
-    if (this._useWebViewAgent && this._agentRunner) {
+    if (this._agentRunner) {
       this._agentRunner.abort()
-      return
     }
-    await this.send({ type: 'agent.stop' })
   }
 
   /**
@@ -727,43 +552,26 @@ export class MobileClawEngine {
     deny?: boolean,
     denyReason?: string,
   ): Promise<void> {
-    // WebView agent path: resolve the pre-execute promise directly
-    if (this._useWebViewAgent) {
-      const resolver = this._preExecuteResolvers.get(toolCallId)
-      if (resolver) {
-        this._preExecuteResolvers.delete(toolCallId)
-        resolver({ deny: deny ?? false, denyReason, args })
-        return
-      }
+    const resolver = this._preExecuteResolvers.get(toolCallId)
+    if (resolver) {
+      this._preExecuteResolvers.delete(toolCallId)
+      resolver({ deny: deny ?? false, denyReason, args })
     }
-    // Worker agent path: send response to worker
-    await this.send({
-      type: 'tool.pre_execute.result',
-      toolCallId,
-      args,
-      ...(deny && { deny }),
-      ...(denyReason && { denyReason }),
-    })
   }
 
   async steerAgent(text: string): Promise<void> {
-    if (this._useWebViewAgent && this._agentRunner) {
+    if (this._agentRunner) {
       this._agentRunner.steer(text)
-      return
     }
-    await this.send({ type: 'agent.steer', text })
   }
 
   // ── Configuration ──────────────────────────────────────────────────────
 
-  async updateConfig(config: Record<string, unknown>): Promise<void> {
-    await this.send({ type: 'config.update', config })
+  async updateConfig(_config: Record<string, unknown>): Promise<void> {
+    // TODO: persist config changes to openclaw.json
   }
 
   async exchangeOAuthCode(tokenUrl: string, body: Record<string, string>, contentType?: string): Promise<any> {
-    // Use Capacitor's native HTTP plugin to bypass WebView CORS restrictions.
-    // On native platforms this runs as a native HTTP call (no CORS).
-    // On web it falls back to fetch (same-origin or CORS-enabled endpoints only).
     const { CapacitorHttp } = await import('@capacitor/core')
     const ct = contentType || 'application/json'
     try {
@@ -782,191 +590,124 @@ export class MobileClawEngine {
   }
 
   async getAuthStatus(provider = 'anthropic'): Promise<AuthStatus> {
-    return new Promise((resolve) => {
-      this._onMessage('config.status.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'config.status', provider })
-    })
+    return getAuthStatusNative(provider)
+  }
+
+  async setAuthKey(key: string, provider = 'anthropic', type: 'api_key' | 'oauth' = 'api_key'): Promise<void> {
+    const { setAuthKey: setAuthKeyNative } = await import('./agent/auth-store')
+    await setAuthKeyNative(key, provider, 'main', type)
   }
 
   // ── Scheduler / heartbeat / cron ─────────────────────────────────────
 
-  async setSchedulerConfig(config: Partial<SchedulerConfig>): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('scheduler.set.result', {
-      type: 'scheduler.set',
-      config,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to set scheduler config')
-    }
+  async setSchedulerConfig(_config: Partial<SchedulerConfig>): Promise<void> {
+    // TODO: CronDbAccess doesn't have a setSchedulerConfig yet — add when needed
   }
 
   async getSchedulerConfig(): Promise<{ scheduler: SchedulerConfig; heartbeat: HeartbeatConfig }> {
-    return this._waitForMessage<{ scheduler: SchedulerConfig; heartbeat: HeartbeatConfig }>('scheduler.get.result', {
-      type: 'scheduler.get',
-    })
+    if (this._cronDb) {
+      const scheduler = await this._cronDb.getSchedulerConfig()
+      const heartbeat = await this._cronDb.getHeartbeatConfig()
+      return { scheduler, heartbeat }
+    }
+    return {
+      scheduler: { enabled: false, schedulingMode: 'balanced' } as SchedulerConfig,
+      heartbeat: { everyMs: 1_800_000 } as HeartbeatConfig,
+    }
   }
 
   async setHeartbeat(config: Partial<HeartbeatConfig>): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('heartbeat.set.result', {
-      type: 'heartbeat.set',
-      config,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to set heartbeat config')
+    if (this._cronDb) {
+      await this._cronDb.setHeartbeatConfig(config as Record<string, unknown>)
     }
   }
 
   async triggerHeartbeatWake(source = 'manual'): Promise<void> {
     if (this._heartbeatManager) {
       await this._heartbeatManager.handleWake(source, { force: source === 'manual' })
-      return
     }
-    await this.send({ type: 'heartbeat.wake', source, timestamp: Date.now() })
   }
 
-  async addCronJob(job: CronJobInput): Promise<CronJobRecord> {
-    const result = await this._waitForMessage<{
-      success: boolean
-      job?: CronJobRecord
-      error?: string
-    }>('cron.job.add.result', { type: 'cron.job.add', job })
-    if (!result.success || !result.job) {
-      throw new Error(result.error || 'Failed to add cron job')
-    }
-    return result.job
+  async addCronJob(_job: CronJobInput): Promise<CronJobRecord> {
+    // TODO: CronDbAccess doesn't have addJob yet — add when needed
+    throw new Error('addCronJob not yet implemented without worker')
   }
 
   async updateCronJob(id: string, patch: Partial<CronJobInput>): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.job.update.result', {
-      type: 'cron.job.update',
-      id,
-      patch,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to update cron job')
-    }
+    if (!this._cronDb) throw new Error('Cron not initialized')
+    await this._cronDb.updateCronJob(id, patch as Record<string, unknown>)
   }
 
-  async removeCronJob(id: string): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.job.remove.result', {
-      type: 'cron.job.remove',
-      id,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to remove cron job')
-    }
+  async removeCronJob(_id: string): Promise<void> {
+    // TODO: CronDbAccess doesn't have removeJob yet — add when needed
+    throw new Error('removeCronJob not yet implemented without worker')
   }
 
   async listCronJobs(): Promise<CronJobRecord[]> {
-    const result = await this._waitForMessage<{ jobs: CronJobRecord[] }>('cron.job.list.result', {
-      type: 'cron.job.list',
-    })
-    return result.jobs || []
+    if (!this._cronDb) return []
+    return this._cronDb.listCronJobs()
   }
 
   async runCronJob(id: string): Promise<void> {
     if (this._heartbeatManager) {
       await this._heartbeatManager.handleWake('manual', { force: true, forceJobId: id })
-      return
-    }
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.job.run.result', {
-      type: 'cron.job.run',
-      id,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to run cron job')
     }
   }
 
-  async getCronRunHistory(jobId?: string, limit = 50): Promise<CronRunRecord[]> {
-    const result = await this._waitForMessage<{ runs: CronRunRecord[] }>('cron.runs.list.result', {
-      type: 'cron.runs.list',
-      ...(jobId ? { jobId } : {}),
-      limit,
-    })
-    return result.runs || []
+  async getCronRunHistory(_jobId?: string, _limit = 50): Promise<CronRunRecord[]> {
+    // TODO: CronDbAccess doesn't have listRuns yet — add when needed
+    return []
   }
 
-  async addSkill(skill: CronSkillInput): Promise<CronSkillRecord> {
-    const result = await this._waitForMessage<{
-      success: boolean
-      skill?: CronSkillRecord
-      error?: string
-    }>('cron.skill.add.result', { type: 'cron.skill.add', skill })
-    if (!result.success || !result.skill) {
-      throw new Error(result.error || 'Failed to add skill')
-    }
-    return result.skill
+  async addSkill(_skill: CronSkillInput): Promise<CronSkillRecord> {
+    // TODO: CronDbAccess doesn't have addSkill yet — add when needed
+    throw new Error('addSkill not yet implemented without worker')
   }
 
-  async updateSkill(id: string, patch: Partial<CronSkillInput>): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.skill.update.result', {
-      type: 'cron.skill.update',
-      id,
-      patch,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to update skill')
-    }
+  async updateSkill(_id: string, _patch: Partial<CronSkillInput>): Promise<void> {
+    // TODO: CronDbAccess doesn't have updateSkill yet — add when needed
+    throw new Error('updateSkill not yet implemented without worker')
   }
 
-  async removeSkill(id: string): Promise<void> {
-    const result = await this._waitForMessage<{ success: boolean; error?: string }>('cron.skill.remove.result', {
-      type: 'cron.skill.remove',
-      id,
-    })
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to remove skill')
-    }
+  async removeSkill(_id: string): Promise<void> {
+    // TODO: CronDbAccess doesn't have removeSkill yet — add when needed
+    throw new Error('removeSkill not yet implemented without worker')
   }
 
   async listSkills(): Promise<CronSkillRecord[]> {
-    const result = await this._waitForMessage<{ skills: CronSkillRecord[] }>('cron.skill.list.result', {
-      type: 'cron.skill.list',
-    })
-    return result.skills || []
+    if (!this._cronDb) return []
+    return this._cronDb.listCronSkills()
   }
 
   // ── File operations ────────────────────────────────────────────────────
 
   async readFile(path: string): Promise<FileReadResult> {
-    return new Promise((resolve) => {
-      this._onMessage(
-        'file.read.result',
-        (msg) => {
-          if (msg.path === path) resolve(msg)
-        },
-        { once: true },
-      )
-      this.send({ type: 'file.read', path })
-    })
+    const result = await readFileNative({ path })
+    const details = result.details as any
+    return { path, content: details?.content || '', error: details?.error }
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    await this.send({ type: 'file.write', path, content })
+    await writeFileNative({ path, content })
   }
 
   // ── Session management ─────────────────────────────────────────────────
 
   async listSessions(agentId = 'main'): Promise<SessionListResult> {
-    return new Promise((resolve) => {
-      this._onMessage('session.list.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'session.list', agentId })
-    })
+    if (!this._sessionStore) return { agentId, sessions: [] }
+    const sessions = await this._sessionStore.listSessions(agentId)
+    return { agentId, sessions }
   }
 
   async getLatestSession(agentId = 'main'): Promise<SessionInfo | null> {
-    return new Promise((resolve) => {
-      this._onMessage('session.latest.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'session.latest', agentId })
-    })
+    if (!this._sessionStore) return null
+    return this._sessionStore.getLatestSession(agentId)
   }
 
-  async loadSessionHistory(sessionKey: string, agentId = 'main'): Promise<SessionHistoryResult> {
-    return new Promise((resolve) => {
-      this._onMessage('session.load.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'session.load', sessionKey, agentId })
-    })
+  async loadSessionHistory(sessionKey: string, _agentId = 'main'): Promise<SessionHistoryResult> {
+    if (!this._sessionStore) return { sessionKey, messages: [] }
+    const messages = await this._sessionStore.loadMessages(sessionKey)
+    return { sessionKey, messages }
   }
 
   async resumeSession(
@@ -976,59 +717,39 @@ export class MobileClawEngine {
   ): Promise<{ success: boolean; error?: string; sessionKey?: string; messageCount?: number }> {
     this._currentSessionKey = sessionKey
 
-    if (this._useWebViewAgent && this._agentRunner) {
-      try {
-        const [authResult, promptResult] = await Promise.all([
-          this._waitForMessage<{ apiKey: string | null; isOAuth: boolean }>('auth.getToken.result', {
-            type: 'auth.getToken',
-            provider: 'anthropic',
-            agentId,
-          }),
-          this._waitForMessage<{ systemPrompt: string }>('system_prompt.get.result', {
-            type: 'system_prompt.get',
-            agentId,
-          }),
-        ])
-
-        if (!authResult.apiKey) {
-          return { success: false, error: 'No API key configured' }
-        }
-
-        const messages = options?.messages ?? []
-        await this._agentRunner.resume({
-          sessionKey,
-          messages,
-          systemPrompt: promptResult.systemPrompt,
-          apiKey: authResult.apiKey,
-          provider: 'anthropic',
-          extraTools: this._extraAgentTools,
-        })
-
-        return {
-          success: true,
-          sessionKey,
-          messageCount: messages.length,
-        }
-      } catch (err: any) {
-        return { success: false, error: err?.message || 'Failed to resume session' }
-      }
+    if (!this._agentRunner) {
+      return { success: false, error: 'Agent runner not initialized' }
     }
 
-    return new Promise((resolve) => {
-      this._onMessage('session.resume.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'session.resume', sessionKey, agentId })
-    })
+    try {
+      const [authResult, systemPrompt] = await Promise.all([getAuthToken('anthropic', agentId), loadSystemPrompt()])
+
+      if (!authResult.apiKey) {
+        return { success: false, error: 'No API key configured' }
+      }
+
+      const messages = options?.messages ?? []
+      await this._agentRunner.resume({
+        sessionKey,
+        messages,
+        systemPrompt,
+        apiKey: authResult.apiKey,
+        provider: 'anthropic',
+        extraTools: this._extraAgentTools,
+      })
+
+      return { success: true, sessionKey, messageCount: messages.length }
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to resume session' }
+    }
   }
 
   async clearConversation(): Promise<{ success: boolean }> {
     this._currentSessionKey = null
-    if (this._useWebViewAgent && this._agentRunner) {
+    if (this._agentRunner) {
       this._agentRunner.clear()
     }
-    return new Promise((resolve) => {
-      this._onMessage('session.clear.result', (msg) => resolve(msg), { once: true })
-      this.send({ type: 'session.clear' })
-    })
+    return { success: true }
   }
 
   async setSessionKey(sessionKey: string): Promise<void> {
@@ -1042,23 +763,21 @@ export class MobileClawEngine {
   // ── Tool invocation ────────────────────────────────────────────────────
 
   async invokeTool(toolName: string, args: Record<string, unknown> = {}): Promise<ToolInvokeResult> {
-    return new Promise((resolve) => {
-      this._onMessage(
-        'tool.invoke.result',
-        (msg) => {
-          if (msg.toolName === toolName) resolve(msg)
-        },
-        { once: true },
-      )
-      this.send({ type: 'tool.invoke', toolName, args })
-    })
+    if (!this._toolProxy) {
+      return { toolName, error: 'Tool proxy not initialized' } as ToolInvokeResult
+    }
+    const tools = this._toolProxy.buildTools()
+    const tool = tools.find((t) => t.name === toolName)
+    if (!tool) {
+      return { toolName, error: `Unknown tool: ${toolName}` } as ToolInvokeResult
+    }
+    const toolCallId = `invoke-${Date.now()}`
+    const result = await tool.execute(toolCallId, args)
+    return { toolName, result } as ToolInvokeResult
   }
 
   // ── Events (Capacitor plugin pattern) ──────────────────────────────────
 
-  /**
-   * Map from Capacitor event names to bridge message types.
-   */
   private static readonly EVENT_MAP: Record<MobileClawEventName, string> = {
     agentEvent: 'agent.event',
     agentCompleted: 'agent.completed',
@@ -1100,18 +819,10 @@ export class MobileClawEngine {
 
   // ── Low-level message listener (for advanced use / framework wrappers) ─
 
-  /**
-   * Register a handler for a specific bridge message type.
-   * Useful for framework wrappers (Vue, React) that need raw bridge access.
-   */
   onMessage(type: string, handler: MessageHandler, opts?: { once?: boolean }): () => void {
     return this._onMessage(type, handler, opts)
   }
 
-  /**
-   * Dispatch a message directly to local listeners.
-   * Useful for consumer-owned middleware that needs to emit UI events.
-   */
   dispatchEvent(message: Record<string, unknown>): void {
     this._dispatch(message)
   }
