@@ -4,7 +4,7 @@
  *
  * Runs `npx cap add android` (if android/ doesn't exist) then applies 3 idempotent patches:
  *   A. Root build.gradle — Kotlin Gradle plugin (required by capacitor-lancedb)
- *   B. App build.gradle  — Java 21 compat + copyNodeJsWorker Gradle task
+ *   B. App build.gradle  — Java 21 compileOptions
  *   C. AndroidManifest   — OAuth deep-link intent filter
  *
  * Safe to run multiple times — each patch checks before applying.
@@ -60,44 +60,24 @@ if (rootSrc.includes('kotlin-gradle-plugin')) {
   }
 }
 
-// ── Patch B: App build.gradle — Java 21 + copyNodeJsWorker ─────────────────
+// ── Patch B: App build.gradle — Java 21 compileOptions ──────────────────────
 
 const appGradle = join(ANDROID, 'app', 'build.gradle')
 const appSrc = readFileSync(appGradle, 'utf8')
 
-if (appSrc.includes('copyNodeJsWorker')) {
-  console.log('[setup-android] Patch B: copyNodeJsWorker already present — skipping')
+if (appSrc.includes('JavaVersion.VERSION_21')) {
+  console.log('[setup-android] Patch B: Java 21 compileOptions already present — skipping')
 } else {
-  let patched = appSrc
-
-  // B1: Add compileOptions with Java 21 (if not present)
-  if (!appSrc.includes('JavaVersion.VERSION_21')) {
-    patched = patched.replace(
-      /(\n\s+buildTypes\s*\{)/,
-      `\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_21\n        targetCompatibility JavaVersion.VERSION_21\n    }\n$1`
-    )
-  }
-
-  // B2: Add copyNodeJsWorker task before the repositories block
-  const workerTask = `
-// Copy Node.js worker assets into the APK so capacitor-nodejs can find them
-task copyNodeJsWorker(type: Copy) {
-    from '../../nodejs-assets/nodejs-project'
-    into 'src/main/assets/public/nodejs-project'
-    exclude 'node_modules/.cache', 'node_modules/.package-lock.json', 'node_modules/.bin'
-}
-preBuild.dependsOn copyNodeJsWorker
-`
-  patched = patched.replace(
-    /\nrepositories\s*\{/,
-    `${workerTask}\nrepositories {`
+  const patched = appSrc.replace(
+    /(\n\s+buildTypes\s*\{)/,
+    `\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_21\n        targetCompatibility JavaVersion.VERSION_21\n    }\n$1`
   )
 
   if (patched === appSrc) {
-    console.error('[setup-android] Patch B: Could not find insertion points — skipping')
+    console.error('[setup-android] Patch B: Could not find buildTypes block — skipping')
   } else {
     writeFileSync(appGradle, patched)
-    console.log('[setup-android] Patch B: Added Java 21 compileOptions + copyNodeJsWorker task')
+    console.log('[setup-android] Patch B: Added Java 21 compileOptions')
     patchCount++
   }
 }
@@ -146,7 +126,6 @@ if (patchCount > 0) {
 const DIST = join(ROOT, 'dist')
 if (!existsSync(DIST)) {
   console.log('[setup-android] dist/ not found — building web assets...')
-  execSync('npm run setup:worker', { cwd: ROOT, stdio: 'inherit' })
   execSync('npx vite build', { cwd: ROOT, stdio: 'inherit' })
 } else {
   console.log('[setup-android] dist/ already exists — skipping build')

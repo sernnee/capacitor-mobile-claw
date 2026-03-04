@@ -22,9 +22,6 @@ const config: CapacitorConfig = {
     Keyboard: {
       resize: 'none',
     },
-    CapacitorNodeJS: {
-      nodeDir: 'nodejs-project',
-    },
   },
 }
 
