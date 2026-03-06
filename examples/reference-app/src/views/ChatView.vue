@@ -146,7 +146,7 @@ function saveProviderModel(provider, model) {
 async function getDefaultModel(provider, preferredModel) {
   try {
     const result = await getModels(provider)
-    const models = result.models || []
+    const models = Array.isArray(result) ? result : (result.models || [])
     if (preferredModel && models.some(m => m.id === preferredModel)) {
       return preferredModel
     }

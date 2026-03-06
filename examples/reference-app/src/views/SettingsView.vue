@@ -915,7 +915,7 @@ async function loadModelsForProvider(provider) {
   availableModels.value = []
   try {
     const result = await getModels(provider)
-    availableModels.value = result.models || []
+    availableModels.value = Array.isArray(result) ? result : (result.models || [])
     // If stored model isn't in the list for this provider, pick the default
     const found = availableModels.value.find(m => m.id === activeModel.value)
     if (!found) {

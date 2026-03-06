@@ -98,8 +98,12 @@ export class AgentRunner {
 
   async run(params: AgentRunParams): Promise<void> {
     const provider = params.provider || 'anthropic'
-    const defaultModel = provider === 'anthropic' ? 'claude-sonnet-4-5' : null
-    const modelId = params.model || defaultModel
+    const DEFAULT_MODELS: Record<string, string> = {
+      anthropic: 'claude-sonnet-4-5',
+      openrouter: 'anthropic/claude-sonnet-4.5',
+      openai: 'gpt-4o',
+    }
+    const modelId = params.model || DEFAULT_MODELS[provider] || null
 
     if (!modelId) {
       this.dispatch({
@@ -303,7 +307,12 @@ export class AgentRunner {
     extraTools?: AgentTool<any>[]
   }): Promise<void> {
     const provider = params.provider || 'anthropic'
-    const modelId = params.model || 'claude-sonnet-4-5'
+    const DEFAULT_MODELS: Record<string, string> = {
+      anthropic: 'claude-sonnet-4-5',
+      openrouter: 'anthropic/claude-sonnet-4.5',
+      openai: 'gpt-4o',
+    }
+    const modelId = params.model || DEFAULT_MODELS[provider] || 'claude-sonnet-4-5'
 
     const [{ getModel }, { Agent }] = await Promise.all([
       import('@mariozechner/pi-ai'),
