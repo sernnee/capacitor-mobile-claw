@@ -32,7 +32,6 @@ if (!existsSync(IOS)) {
 const DIST = join(ROOT, 'dist')
 if (!existsSync(DIST)) {
   console.log('[setup-ios] dist/ not found — building web assets...')
-  execSync('npm run setup:worker', { cwd: ROOT, stdio: 'inherit' })
   execSync('npx vite build', { cwd: ROOT, stdio: 'inherit' })
 } else {
   console.log('[setup-ios] dist/ already exists — skipping build')
