@@ -548,8 +548,8 @@ export async function runSentinelE2E() {
   // ── 12. MobileCron sentinel job registration ─────────────────────────
   await section('12. sentinel-heartbeat Registered in MobileCron', async () => {
     if (isIOS) {
-      skip('sentinel-heartbeat job in MobileCron', 'MobileCron not available on iOS')
-      skip('sentinel job enabled', 'MobileCron not available on iOS')
+      skip('sentinel-heartbeat job in MobileCron', 'BGTaskScheduler not testable on Simulator')
+      skip('sentinel job enabled', 'BGTaskScheduler not testable on Simulator')
       return
     }
     const MobileCron = window.Capacitor.Plugins.MobileCron
@@ -564,8 +564,8 @@ export async function runSentinelE2E() {
   // ── 13. MobileCron jobDue → heartbeat.wake relay ─────────────────────
   await section('13. MobileCron.triggerNow → jobDue → heartbeat.wake', async () => {
     if (isIOS) {
-      skip('MobileCron.register returns id', 'MobileCron not available on iOS')
-      skip('heartbeatStarted fires from MobileCron.triggerNow → jobDue', 'MobileCron not available on iOS')
+      skip('MobileCron.register returns id', 'BGTaskScheduler not testable on Simulator')
+      skip('heartbeatStarted fires from MobileCron.triggerNow → jobDue', 'BGTaskScheduler not testable on Simulator')
       return
     }
     const MobileCron = window.Capacitor.Plugins.MobileCron

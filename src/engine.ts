@@ -633,6 +633,32 @@ export class MobileClawEngine {
   async setSchedulerConfig(config: Partial<SchedulerConfig>): Promise<void> {
     if (!this._cronDb) return
     await this._cronDb.setSchedulerConfig(config as Record<string, unknown>)
+
+    // Register/unregister MobileCron sentinel job when toggling enabled
+    if (this._mobileCron && 'enabled' in config) {
+      if (config.enabled) {
+        const full = await this.getSchedulerConfig()
+        await this._mobileCron.register({
+          name: 'sentinel-heartbeat',
+          schedule: {
+            kind: 'every',
+            everyMs: full.heartbeat.everyMs || 1_800_000,
+          },
+          activeHours: full.heartbeat.activeHours,
+          priority: 'normal',
+          requiresNetwork: true,
+        })
+        await this._mobileCron.setMode({
+          mode: config.schedulingMode || full.scheduler.schedulingMode,
+        })
+      } else {
+        try {
+          const jobs = await this._mobileCron.list()
+          const sentinel = (jobs?.jobs || []).find((j: any) => j.name === 'sentinel-heartbeat')
+          if (sentinel) await this._mobileCron.unregister({ id: sentinel.id })
+        } catch {}
+      }
+    }
   }
 
   async getSchedulerConfig(): Promise<{ scheduler: SchedulerConfig; heartbeat: HeartbeatConfig }> {
