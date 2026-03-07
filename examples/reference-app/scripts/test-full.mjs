@@ -23,7 +23,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REF_APP = path.resolve(__dirname, '..')
 const ROOT = path.resolve(REF_APP, '..', '..')
 
-const ADB = process.env.ADB_PATH || '/home/rruiz/Android/Sdk/platform-tools/adb'
+const ADB = process.env.ADB_PATH || (
+  process.platform === 'darwin'
+    ? `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
+    : `${process.env.HOME}/Android/Sdk/platform-tools/adb`
+)
 const IOS_SSH_HOST = process.env.IOS_SSH_HOST || 'rogelioruizgatica@10.61.192.207'
 const IOS_SSH_TIMEOUT = 5 // seconds
 

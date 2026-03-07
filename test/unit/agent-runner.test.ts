@@ -201,14 +201,14 @@ describe('AgentRunner', () => {
       expect(runner.sessionKey).toBe('sess-2')
     })
 
-    it('should dispatch error when no model specified for non-anthropic provider', async () => {
+    it('should dispatch error when no model specified for unknown provider', async () => {
       await runner.run({
         prompt: 'Hello',
         agentId: 'main',
         sessionKey: 'sess-3',
         apiKey: 'sk-test',
         systemPrompt: 'Test',
-        provider: 'openai', // no default model
+        provider: 'unknown-provider', // no default model
       })
 
       const error = dispatched.find((m) => m.type === 'agent.error')

@@ -17,7 +17,11 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const ADB = process.env.ADB_PATH || '/home/rruiz/Android/Sdk/platform-tools/adb';
+const ADB = process.env.ADB_PATH || (
+  process.platform === 'darwin'
+    ? `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`
+    : `${process.env.HOME}/Android/Sdk/platform-tools/adb`
+);
 const CDP_PORT = 9222;
 const APP_PKG = 'io.mobileclaw.reference';
 
@@ -90,33 +94,30 @@ function httpGetJSON(url) {
   });
 }
 
-// Auto-launch app if not running
-let pid;
+// Always force-stop + clear app data for a clean test run (prevents stale SQLite state)
+try { execSync(`${ADB} shell am force-stop ${APP_PKG}`, { encoding: 'utf-8', timeout: 5000 }); } catch {}
+try { execSync(`${ADB} shell pm clear ${APP_PKG}`, { encoding: 'utf-8', timeout: 5000 }); } catch {}
+console.log('App data cleared — launching fresh...');
+
+// Inject setup gate bypass
 try {
-  pid = execSync(`${ADB} shell pidof ${APP_PKG}`, { encoding: 'utf-8' }).trim();
-} catch {
-  pid = '';
-}
-if (!pid) {
-  console.log(`${APP_PKG} not running — launching...`);
-  // Inject setup gate bypass
+  const setupXml = `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n    <string name="shell-setup-complete">true</string>\n</map>`;
+  execSync(`${ADB} shell "run-as ${APP_PKG} mkdir -p /data/data/${APP_PKG}/shared_prefs"`, { encoding: 'utf-8' });
+  execSync(`echo '${setupXml}' | ${ADB} shell "run-as ${APP_PKG} sh -c 'cat > /data/data/${APP_PKG}/shared_prefs/CapacitorStorage.xml'"`, { encoding: 'utf-8', shell: true });
+} catch (e) { console.log('  (setup gate bypass skipped:', e.message, ')'); }
+execSync(`${ADB} shell am start -n ${APP_PKG}/.MainActivity`, { encoding: 'utf-8' });
+
+// Wait for app to start
+let pid = '';
+for (let i = 0; i < 10; i++) {
+  await new Promise(r => setTimeout(r, 1000));
   try {
-    const setupXml = `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n    <string name="shell-setup-complete">true</string>\n</map>`;
-    execSync(`${ADB} shell "run-as ${APP_PKG} mkdir -p /data/data/${APP_PKG}/shared_prefs"`, { encoding: 'utf-8' });
-    execSync(`echo '${setupXml}' | ${ADB} shell "run-as ${APP_PKG} sh -c 'cat > /data/data/${APP_PKG}/shared_prefs/CapacitorStorage.xml'"`, { encoding: 'utf-8', shell: true });
-  } catch (e) { console.log('  (setup gate bypass skipped:', e.message, ')'); }
-  execSync(`${ADB} shell am start -n ${APP_PKG}/.MainActivity`, { encoding: 'utf-8' });
-  // Wait for app to start
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 1000));
-    try {
-      pid = execSync(`${ADB} shell pidof ${APP_PKG}`, { encoding: 'utf-8' }).trim();
-      if (pid) break;
-    } catch {}
-  }
-  if (!pid) { console.error(`Failed to launch ${APP_PKG}`); process.exit(1); }
-  console.log(`  App launched (PID ${pid})`);
+    pid = execSync(`${ADB} shell pidof ${APP_PKG}`, { encoding: 'utf-8' }).trim();
+    if (pid) break;
+  } catch {}
 }
+if (!pid) { console.error(`Failed to launch ${APP_PKG}`); process.exit(1); }
+console.log(`  App launched (PID ${pid})`);
 execSync(`${ADB} forward tcp:${CDP_PORT} localabstract:webview_devtools_remote_${pid}`);
 await new Promise(r => setTimeout(r, 800));
 
